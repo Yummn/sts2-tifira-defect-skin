@@ -74,7 +74,7 @@ public static class MainFile
         {
             harmony.PatchAll(Assembly.GetExecutingAssembly());
             ApplySafeReflectionPatches(harmony);
-            Log.Info("[TifiraDefectSkin] loaded v1.1.3 enhanced: smoother animation gates/fades and de-duplicated voice playback.", 2);
+            Log.Info("[TifiraDefectSkin] loaded v1.1.5 enhanced: Battle Ready starts from card play-zone/targeting instead of raw card press, with smoother gates/fades and de-duplicated voice playback.", 2);
         }
         catch (Exception ex)
         {
@@ -87,12 +87,12 @@ public static class MainFile
         // These method names changed several times between PC/mobile builds. Patch opportunistically.
         TryPatch(harmony, typeof(NCombatRoom), "_Ready", postfix: nameof(OnCombatRoomReadyPostfix));
 
-        foreach (var method in new[] { "OnMousePressed", "OnTouchPressed", "OnPointerPressed", "OnInputPressed", "OnCardPressed" })
-            TryPatch(harmony, typeof(NHandCardHolder), method, postfix: nameof(OnHandCardPressedPostfix));
-
-        foreach (var method in new[] { "OnMouseReleased", "OnTouchReleased", "OnPointerReleased", "OnInputReleased", "OnCardReleased" })
-            TryPatch(harmony, typeof(NHandCardHolder), method, postfix: nameof(OnHandCardReleasedPostfix));
-
+        // Do not hook raw card press/release for Battle Ready.  On mobile the
+        // same press event is used for viewing/selecting a card, so the large
+        // left cut-in was being instantiated/replayed while simply reading or
+        // dragging cards.  Start the overlay only after NCardPlay enters the
+        // play-zone/targeting path instead.
+        TryPatch(harmony, typeof(NCardPlay), "TryShowEvokingOrbs", postfix: nameof(OnCardPlayTargetingPostfix));
         TryPatch(harmony, typeof(NCardPlay), "CancelPlayCard", postfix: nameof(OnCancelPlayCardPostfix));
 
         // Optional/non-essential screens.
@@ -331,22 +331,23 @@ public static class MainFile
 
     public static void OnHandCardPressedPostfix(NHandCardHolder __instance, object[]? __args)
     {
-        if (!IsPrimaryPress(__args))
-            return;
-
-        var card = ((NCardHolder)__instance).CardModel;
-        if (card?.Owner?.Character is Defect)
-            BattleReadyOverlay.TryStartHold(card);
+        // Kept for binary/backport compatibility; not patched in v1.1.5+.
     }
 
     public static void OnHandCardReleasedPostfix(NHandCardHolder __instance, object[]? __args)
     {
-        if (!IsPrimaryPress(__args))
-            return;
+        // Kept for binary/backport compatibility; not patched in v1.1.5+.
+    }
 
-        var card = ((NCardHolder)__instance).CardModel;
-        if (card?.Owner?.Character is Defect)
-            BattleReadyOverlay.NotifyReleased(card);
+    public static void OnCardPlayTargetingPostfix(NCardPlay __instance)
+    {
+        try
+        {
+            var card = __instance?.Holder?.CardModel;
+            if (card?.Owner?.Character is Defect)
+                BattleReadyOverlay.ShowForPlayZone(card);
+        }
+        catch { }
     }
 
     public static void OnCancelPlayCardPostfix(NCardPlay __instance)
@@ -911,13 +912,18 @@ public static class MainFile
         private static Node? _node;
         private static MegaSprite? _sprite;
         private static CardModel? _activeCard;
+        private static CardModel? _pendingCard;
         private static bool _busy;
         private static bool _played;
         private static bool _fadingOut;
         private static ulong _token;
+        private static ulong _pendingToken;
+        private static ulong _lastOverlayStartMsec;
         private static Tween? _fadeTween;
-        private const double FadeInSeconds = 0.18;
-        private const double FadeOutSeconds = 0.28;
+        private static bool? _isMobileRuntime;
+        private const int PcHoldDelayMs = 160;
+        private const int MobileHoldDelayMs = 360;
+        private const int OverlayReopenCooldownMs = 650;
 
         public static void InitializePreload()
         {
@@ -972,8 +978,48 @@ public static class MainFile
             {
                 if (_activeCard == card && !_fadingOut)
                     return;
+            }
 
-                HideImmediate();
+            // On touch screens a normal tap/drag fires the same press hook used by
+            // PC hover/hold.  Starting the large Spine cut-in immediately makes
+            // every card inspection/play repaint the overlay and was the main
+            // stutter visible in the supplied Android video.  Queue it first and
+            // only materialize the cut-in if the card is still held after a short
+            // delay; quick taps and fast plays only use the normal body animation.
+            _pendingCard = card;
+            var requestToken = ++_pendingToken;
+            Schedule(IsMobileRuntime() ? MobileHoldDelayMs : PcHoldDelayMs, () => StartOverlayNow(card, requestToken));
+        }
+
+        public static void ShowForPlayZone(CardModel card)
+        {
+            if (!TifiraConfig.UseBattleReadyAnim || card.Owner?.Character is not Defect)
+                return;
+
+            _pendingCard = card;
+            var requestToken = ++_pendingToken;
+            StartOverlayNow(card, requestToken);
+        }
+
+        private static void StartOverlayNow(CardModel card, ulong requestToken)
+        {
+            if (_pendingToken != requestToken || _pendingCard != card)
+                return;
+            _pendingCard = null;
+
+            if (!TifiraConfig.UseBattleReadyAnim || card.Owner?.Character is not Defect)
+                return;
+
+            var now = Time.GetTicksMsec();
+            if (_lastOverlayStartMsec != 0 && now - _lastOverlayStartMsec < OverlayReopenCooldownMs)
+                return;
+
+            if (_busy)
+            {
+                if (_activeCard == card && !_fadingOut)
+                    return;
+
+                HideImmediate(clearPending: false);
             }
 
             if (_node == null || _sprite == null || !GodotObject.IsInstanceValid(_node))
@@ -981,43 +1027,50 @@ public static class MainFile
             if (_node == null || _sprite == null)
                 return;
 
+            _lastOverlayStartMsec = now;
             _activeCard = card;
             _busy = true;
             _played = false;
             _fadingOut = false;
             _token++;
             FadeIn(_token);
-            PlayOnSprite(_sprite, _sprite.HasAnimation("b_into") ? "b_into" : "b_idle", "b_idle", loopNext: true, force: true);
+            var introAnim = _sprite.HasAnimation("b_into") && !IsMobileRuntime() ? "b_into" : "b_idle";
+            PlayOnSprite(_sprite, introAnim, "b_idle", loopNext: true, force: true);
         }
 
         public static void NotifyReleased(CardModel card)
         {
+            CancelPending(card);
             if (!_busy || _activeCard != card)
                 return;
-            _ = WaitThenOut(_token);
+            WaitThenOut(_token);
         }
 
         public static void NotifyCanceled(CardModel card)
         {
+            CancelPending(card);
             if (_busy && _activeCard == card && !_played)
                 StartOut();
         }
 
         public static void NotifyBeforeCardPlayed(CardPlay cardPlay)
         {
+            CancelPending(cardPlay.Card);
             if (!_busy || _activeCard != cardPlay.Card || _sprite == null)
                 return;
             _played = true;
             var anim = cardPlay.Card.Type == CardType.Attack ? "card_attack" : "card_casting";
             PlayOnSprite(_sprite, anim, null, loopNext: false, force: true);
-            _ = HideSoon(_token);
+            HideSoon(_token);
         }
 
-        private static async Task WaitThenOut(ulong token)
+        private static void CancelPending(CardModel card)
         {
-            await Task.Delay(120);
-            if (_busy && !_played && token == _token)
-                StartOut();
+            if (_pendingCard != card)
+                return;
+
+            _pendingCard = null;
+            _pendingToken++;
         }
 
         private static void OnActiveCardPlayed()
@@ -1040,7 +1093,7 @@ public static class MainFile
             {
                 _played = true;
                 PlayOnSprite(_sprite, "b_out", null, loopNext: false, force: true);
-                _ = FadeOutAfterDelay(_token, 320);
+                FadeOutAfterDelay(_token, 260);
             }
             else
             {
@@ -1053,8 +1106,13 @@ public static class MainFile
             FadeOutAndHide(_token);
         }
 
-        private static void HideImmediate()
+        private static void HideImmediate(bool clearPending = true)
         {
+            if (clearPending)
+            {
+                _pendingCard = null;
+                _pendingToken++;
+            }
             _activeCard = null;
             _busy = false;
             _played = false;
@@ -1067,18 +1125,31 @@ public static class MainFile
             }
         }
 
-        private static async Task HideSoon(ulong token)
+        private static void HideSoon(ulong token)
         {
-            await Task.Delay(900);
-            if (_busy && _played && token == _token)
-                FadeOutAndHide(token);
+            Schedule(IsMobileRuntime() ? 560 : 820, () =>
+            {
+                if (_busy && _played && token == _token)
+                    FadeOutAndHide(token);
+            });
         }
 
-        private static async Task FadeOutAfterDelay(ulong token, int delayMs)
+        private static void FadeOutAfterDelay(ulong token, int delayMs)
         {
-            await Task.Delay(delayMs);
-            if (_busy && token == _token)
-                FadeOutAndHide(token);
+            Schedule(delayMs, () =>
+            {
+                if (_busy && token == _token)
+                    FadeOutAndHide(token);
+            });
+        }
+
+        private static void WaitThenOut(ulong token)
+        {
+            Schedule(120, () =>
+            {
+                if (_busy && !_played && token == _token)
+                    StartOut();
+            });
         }
 
         private static void FadeIn(ulong token)
@@ -1094,7 +1165,7 @@ public static class MainFile
             _fadeTween = ci.CreateTween();
             _fadeTween.SetTrans(Tween.TransitionType.Sine);
             _fadeTween.SetEase(Tween.EaseType.Out);
-            _fadeTween.TweenProperty(ci, "modulate", WithAlpha(ci.Modulate, 1f), FadeInSeconds);
+            _fadeTween.TweenProperty(ci, "modulate", WithAlpha(ci.Modulate, 1f), IsMobileRuntime() ? 0.10 : 0.18);
         }
 
         private static void FadeOutAndHide(ulong token)
@@ -1110,7 +1181,7 @@ public static class MainFile
             _fadeTween = ci.CreateTween();
             _fadeTween.SetTrans(Tween.TransitionType.Sine);
             _fadeTween.SetEase(Tween.EaseType.In);
-            _fadeTween.TweenProperty(ci, "modulate", WithAlpha(ci.Modulate, 0f), FadeOutSeconds);
+            _fadeTween.TweenProperty(ci, "modulate", WithAlpha(ci.Modulate, 0f), IsMobileRuntime() ? 0.16 : 0.28);
             _fadeTween.TweenCallback(Callable.From(() =>
             {
                 if (token == _token)
@@ -1132,6 +1203,50 @@ public static class MainFile
         private static Color WithAlpha(Color color, float alpha)
         {
             return new Color(color.R, color.G, color.B, alpha);
+        }
+
+        private static void Schedule(int delayMs, Action action)
+        {
+            try
+            {
+                var tree = Engine.GetMainLoop() as SceneTree;
+                if (tree == null)
+                {
+                    action();
+                    return;
+                }
+
+                var timer = tree.CreateTimer(Math.Max(0.001, delayMs / 1000.0));
+                timer.Timeout += () =>
+                {
+                    try { action(); }
+                    catch (Exception ex) { Log.Warn("[TifiraDefectSkin] delayed overlay callback failed: " + ex.Message, 2); }
+                };
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("[TifiraDefectSkin] schedule overlay callback failed: " + ex.Message, 2);
+            }
+        }
+
+        private static bool IsMobileRuntime()
+        {
+            if (_isMobileRuntime.HasValue)
+                return _isMobileRuntime.Value;
+
+            try
+            {
+                var osName = Godot.OS.GetName();
+                _isMobileRuntime =
+                    Godot.OS.HasFeature("android") ||
+                    osName.Contains("Android", StringComparison.OrdinalIgnoreCase) ||
+                    osName.Contains("iOS", StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                _isMobileRuntime = false;
+            }
+            return _isMobileRuntime.Value;
         }
     }
 }
