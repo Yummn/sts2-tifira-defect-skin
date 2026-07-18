@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
@@ -44,7 +44,15 @@ public static class MainFile
         "res://scenes/character_select_bg/defect2/characterselect_defect_live.tscn",
     ];
 
-    private static readonly Dictionary<string, float> LastAnimMsecByKey = new();
+    private sealed class AnimGateState
+    {
+        public string CurrentAnim = "";
+        public int Priority;
+        public ulong UntilMsec;
+    }
+
+    private static readonly Dictionary<string, ulong> LastAnimMsecByKey = new();
+    private static readonly Dictionary<string, AnimGateState> AnimGateByKey = new();
     private static Resource? _bodySkin;
     private static int _currentBgIndex;
 
@@ -54,6 +62,7 @@ public static class MainFile
         {
             TifiraConfig.LoadSettings();
             MolingGlobalConfig.LoadSettings();
+            PreloadCommonResources();
         }
         catch
         {
@@ -65,7 +74,7 @@ public static class MainFile
         {
             harmony.PatchAll(Assembly.GetExecutingAssembly());
             ApplySafeReflectionPatches(harmony);
-            Log.Info("[TifiraDefectSkin] loaded v1.1.1 enhanced: select art, voice, combat body, battle ready with fade-in/fade-out, attack/cast/block/orb/victory/death animation triggers.", 2);
+            Log.Info("[TifiraDefectSkin] loaded v1.1.3 enhanced: smoother animation gates/fades and de-duplicated voice playback.", 2);
         }
         catch (Exception ex)
         {
@@ -224,7 +233,10 @@ public static class MainFile
                 var anim = ChooseCardAnim(card);
                 BattleReadyOverlay.NotifyBeforeCardPlayed(cardPlay);
                 PlayPlayerAnim(card.Owner, anim, returnIdle: true, cooldownMs: 120);
-                TifiraAudioManager.PlayLogicalSound(anim, null);
+                // The attached Spine animation_started listener plays the
+                // matching voice/SFX.  Calling PlayLogicalSound here as well
+                // caused the same clip to be started twice on Android, heard
+                // as a short echo/重音.
             }
             catch (Exception ex)
             {
@@ -402,7 +414,7 @@ public static class MainFile
             button = new Button
             {
                 Name = "TifiraBgBtn",
-                Text = "切换背景",
+                Text = "\u5207\u6362\u80CC\u666F",
                 Position = new Vector2(300, 900),
                 CustomMinimumSize = new Vector2(260, 72),
             };
@@ -420,16 +432,24 @@ public static class MainFile
 
     private static void LoadCharacterSelectScene(Control container, string path)
     {
-        foreach (var child in container.GetChildren())
-            child.QueueFree();
+        var oldChildren = container.GetChildren().OfType<CanvasItem>().ToList();
 
         var scene = ResourceLoader.Load<PackedScene>(path, null, ResourceLoader.CacheMode.Reuse);
         var inst = scene?.Instantiate();
         if (inst == null)
+        {
+            foreach (var child in container.GetChildren())
+                child.QueueFree();
             return;
+        }
 
         container.AddChild(inst);
         inst.Owner = container;
+        if (inst is CanvasItem newCanvas)
+        {
+            newCanvas.Modulate = WithAlpha(newCanvas.Modulate, 0f);
+            newCanvas.Visible = true;
+        }
 
         foreach (var spine in CollectSpineNodes(inst))
         {
@@ -447,6 +467,10 @@ public static class MainFile
                 state.SetTimeScale(1.05f);
             }
         }
+
+        FadeCanvasItemIn(inst as CanvasItem, 0.16);
+        foreach (var old in oldChildren)
+            FadeCanvasItemOutAndFree(old, 0.12);
     }
 
     private static void ApplyTifiraBody(NCreature creatureNode, float scale, Vector2 offset, bool playEnter)
@@ -462,6 +486,9 @@ public static class MainFile
 
         body.SetMeta("is_tifira_enhanced", Variant.From(true));
         AttachAudioListener(body);
+        var bodyFadeBase = body.Modulate;
+        body.Modulate = WithAlpha(bodyFadeBase, 0f);
+        body.Visible = true;
         sprite.SetSkeletonDataRes(new MegaSkeletonDataResource(skin));
         // Defect's vanilla Spine node is authored very small; multiplying its
         // existing scale makes Tifira nearly invisible in combat.  The source
@@ -475,6 +502,7 @@ public static class MainFile
             PlayOnSprite(sprite, "enter", "idle_loop", loopNext: true, force: true);
         else
             PlayOnSprite(sprite, "idle_loop", null, loopNext: true, force: true);
+        FadeCanvasItemIn(body, 0.18, bodyFadeBase.A <= 0f ? 1f : bodyFadeBase.A);
     }
 
     private static void ApplyFirstSpineChild(Node root, float scale, Vector2 offset, string preferredAnim, bool loop)
@@ -491,10 +519,14 @@ public static class MainFile
             spine.SetMeta("is_tifira_enhanced", Variant.From(true));
             AttachAudioListener(spine);
             var sprite = new MegaSprite(spine);
+            var fadeBase = spine.Modulate;
+            spine.Modulate = WithAlpha(fadeBase, 0f);
+            spine.Visible = true;
             sprite.SetSkeletonDataRes(new MegaSkeletonDataResource(skin));
             spine.Scale = new Vector2(Mathf.Abs(spine.Scale.X) * scale, Mathf.Abs(spine.Scale.Y) * scale);
             spine.Position += offset;
             PlayOnSprite(sprite, preferredAnim, null, loopNext: loop, force: true);
+            FadeCanvasItemIn(spine, 0.14, fadeBase.A <= 0f ? 1f : fadeBase.A);
         }
     }
 
@@ -515,9 +547,13 @@ public static class MainFile
 
             spine.SetMeta("is_tifira_enhanced", Variant.From(true));
             AttachAudioListener(spine);
+            var fadeBase = spine.Modulate;
+            spine.Modulate = WithAlpha(fadeBase, 0f);
+            spine.Visible = true;
             sprite.SetSkeletonDataRes(new MegaSkeletonDataResource(skin));
             spine.Scale *= 1.3f;
             PlayOnSprite(sprite, sprite.HasAnimation("idle_loop") ? "idle_loop" : "b_idle", null, loopNext: true, force: true);
+            FadeCanvasItemIn(spine, 0.14, fadeBase.A <= 0f ? 1f : fadeBase.A);
         }
     }
 
@@ -528,6 +564,24 @@ public static class MainFile
 
         _bodySkin = ResourceLoader.Load<Resource>(BodySkinPath, null, ResourceLoader.CacheMode.Reuse);
         return _bodySkin;
+    }
+
+    private static void PreloadCommonResources()
+    {
+        try
+        {
+            _bodySkin ??= ResourceLoader.Load<Resource>(BodySkinPath, null, ResourceLoader.CacheMode.Reuse);
+        }
+        catch { }
+
+        try
+        {
+            // Keep the first card-use / first combat transition smooth by
+            // warming up the most frequently used audio streams.  The battle
+            // ready scene itself is still instantiated lazily per combat room.
+            TifiraAudioManager.PreloadCoreSounds();
+        }
+        catch { }
     }
 
     private static Player? ResolvePlayerForIndexedScene(object? room, int index)
@@ -621,18 +675,22 @@ public static class MainFile
     {
         try
         {
+            var now = Time.GetTicksMsec();
+
+            if (!sprite.HasAnimation(anim))
+                anim = FallbackAnim(sprite, anim);
+            if (!sprite.HasAnimation(anim))
+                return false;
+
             if (!force && cooldownMs > 0)
             {
-                var now = Time.GetTicksMsec();
                 var fullKey = key + ":" + anim;
                 if (LastAnimMsecByKey.TryGetValue(fullKey, out var last) && now - last < cooldownMs)
                     return false;
                 LastAnimMsecByKey[fullKey] = now;
             }
 
-            if (!sprite.HasAnimation(anim))
-                anim = FallbackAnim(sprite, anim);
-            if (!sprite.HasAnimation(anim))
+            if (!force && !CanStartAnim(key, anim, now))
                 return false;
 
             var state = TryGetAnimationStateCompat(sprite);
@@ -642,6 +700,9 @@ public static class MainFile
             state.SetAnimation(anim, loopNext && next == null, 0);
             if (next != null && sprite.HasAnimation(next))
                 state.AddAnimation(next, 0, loopNext, 0);
+
+            if (!force)
+                MarkAnimStarted(key, anim, now);
             return true;
         }
         catch (Exception ex)
@@ -649,6 +710,110 @@ public static class MainFile
             Log.Warn("[TifiraDefectSkin] play anim failed: " + anim + " / " + ex.Message, 2);
             return false;
         }
+    }
+
+    private static bool CanStartAnim(string key, string anim, ulong now)
+    {
+        var gateKey = key + ":active";
+        if (!AnimGateByKey.TryGetValue(gateKey, out var gate))
+            return true;
+        if (now >= gate.UntilMsec)
+            return true;
+
+        var priority = GetAnimPriority(anim);
+        if (string.Equals(gate.CurrentAnim, anim, StringComparison.Ordinal) && now + 220UL < gate.UntilMsec)
+            return false;
+
+        return priority > gate.Priority;
+    }
+
+    private static void MarkAnimStarted(string key, string anim, ulong now)
+    {
+        var lockMs = GetAnimLockMsec(anim);
+        if (lockMs <= 0)
+            return;
+
+        AnimGateByKey[key + ":active"] = new AnimGateState
+        {
+            CurrentAnim = anim,
+            Priority = GetAnimPriority(anim),
+            UntilMsec = now + (ulong)lockMs,
+        };
+    }
+
+    private static int GetAnimPriority(string anim)
+    {
+        return anim switch
+        {
+            "victory_ready" or "victory" or "die" => 100,
+            "hurt" => 85,
+            "attack" or "attack2" or "card_attack" => 75,
+            "cast4" or "card_casting" => 68,
+            "cast3" => 60,
+            "cast2" => 55,
+            "cast" => 50,
+            "enter" => 35,
+            _ => 0,
+        };
+    }
+
+    private static int GetAnimLockMsec(string anim)
+    {
+        return anim switch
+        {
+            "victory_ready" or "victory" or "die" => 1200,
+            "hurt" => 420,
+            "attack" or "attack2" or "card_attack" => 620,
+            "cast4" or "card_casting" => 680,
+            "cast3" => 520,
+            "cast2" or "cast" => 460,
+            "enter" => 850,
+            _ => 0,
+        };
+    }
+
+    private static void FadeCanvasItemIn(CanvasItem? item, double seconds, float targetAlpha = 1f)
+    {
+        try
+        {
+            if (item == null || !GodotObject.IsInstanceValid(item))
+                return;
+
+            item.Visible = true;
+            var tween = item.CreateTween();
+            tween.SetTrans(Tween.TransitionType.Sine);
+            tween.SetEase(Tween.EaseType.Out);
+            tween.TweenProperty(item, "modulate", WithAlpha(item.Modulate, targetAlpha), seconds);
+        }
+        catch { }
+    }
+
+    private static void FadeCanvasItemOutAndFree(CanvasItem? item, double seconds)
+    {
+        try
+        {
+            if (item == null || !GodotObject.IsInstanceValid(item))
+                return;
+
+            var tween = item.CreateTween();
+            tween.SetTrans(Tween.TransitionType.Sine);
+            tween.SetEase(Tween.EaseType.In);
+            tween.TweenProperty(item, "modulate", WithAlpha(item.Modulate, 0f), seconds);
+            tween.TweenCallback(Callable.From(() =>
+            {
+                if (GodotObject.IsInstanceValid(item))
+                    item.QueueFree();
+            }));
+        }
+        catch
+        {
+            try { item?.QueueFree(); } catch { }
+        }
+    }
+
+    private static Color WithAlpha(Color color, float alpha)
+    {
+        return new Color(color.R, color.G, color.B, alpha);
     }
 
     private static string FallbackAnim(MegaSprite sprite, string requested)
@@ -748,15 +913,19 @@ public static class MainFile
         private static CardModel? _activeCard;
         private static bool _busy;
         private static bool _played;
+        private static bool _fadingOut;
         private static ulong _token;
         private static Tween? _fadeTween;
         private const double FadeInSeconds = 0.18;
-        private const double FadeOutSeconds = 0.22;
+        private const double FadeOutSeconds = 0.28;
 
         public static void InitializePreload()
         {
             try
             {
+                if (_node != null && GodotObject.IsInstanceValid(_node) && _sprite != null)
+                    return;
+
                 _node = null;
                 _sprite = null;
 
@@ -796,8 +965,17 @@ public static class MainFile
 
         public static void TryStartHold(CardModel card)
         {
-            if (!TifiraConfig.UseBattleReadyAnim || _busy || card.Owner?.Character is not Defect)
+            if (!TifiraConfig.UseBattleReadyAnim || card.Owner?.Character is not Defect)
                 return;
+
+            if (_busy)
+            {
+                if (_activeCard == card && !_fadingOut)
+                    return;
+
+                HideImmediate();
+            }
+
             if (_node == null || _sprite == null || !GodotObject.IsInstanceValid(_node))
                 InitializePreload();
             if (_node == null || _sprite == null)
@@ -806,6 +984,7 @@ public static class MainFile
             _activeCard = card;
             _busy = true;
             _played = false;
+            _fadingOut = false;
             _token++;
             FadeIn(_token);
             PlayOnSprite(_sprite, _sprite.HasAnimation("b_into") ? "b_into" : "b_idle", "b_idle", loopNext: true, force: true);
@@ -853,11 +1032,15 @@ public static class MainFile
 
         private static void StartOut()
         {
+            if (_fadingOut)
+                return;
+
+            _fadingOut = true;
             if (_sprite != null && _sprite.HasAnimation("b_out"))
             {
                 _played = true;
                 PlayOnSprite(_sprite, "b_out", null, loopNext: false, force: true);
-                _ = FadeOutAfterDelay(_token, 180);
+                _ = FadeOutAfterDelay(_token, 320);
             }
             else
             {
@@ -875,6 +1058,7 @@ public static class MainFile
             _activeCard = null;
             _busy = false;
             _played = false;
+            _fadingOut = false;
             KillFadeTween();
             if (_node is CanvasItem ci)
             {
@@ -921,6 +1105,7 @@ public static class MainFile
                 return;
             }
 
+            _fadingOut = true;
             KillFadeTween();
             _fadeTween = ci.CreateTween();
             _fadeTween.SetTrans(Tween.TransitionType.Sine);
@@ -1006,6 +1191,7 @@ public static class MolingGlobalConfig
 public static class TifiraAudioManager
 {
     private static readonly Dictionary<string, AudioStream> AudioCache = new();
+    private static readonly Dictionary<string, ulong> LastSoundMsecByGroup = new();
     private static ulong _lastIdlePlayTime;
     private static ulong _lastShopPlayTime;
     private static ulong _lastCampfirePlayTime;
@@ -1026,6 +1212,15 @@ public static class TifiraAudioManager
     public static void PlayAnimSound(string animName, Node parent)
     {
         var ticks = Time.GetTicksMsec();
+        var group = GetAudioGroup(animName);
+        var minInterval = GetAudioMinIntervalMs(group);
+        if (minInterval > 0 &&
+            LastSoundMsecByGroup.TryGetValue(group, out var lastGroupPlay) &&
+            ticks - lastGroupPlay < (ulong)minInterval)
+        {
+            return;
+        }
+
         string? path = animName switch
         {
             "enter" => "res://TifiraDefectSkin/audio/enter.ogg",
@@ -1045,7 +1240,8 @@ public static class TifiraAudioManager
         if (animName == "idle_loop") _lastIdlePlayTime = ticks;
         if (animName == "b_idle") _lastShopPlayTime = ticks;
         if (animName == "overgrowth_loop") _lastCampfirePlayTime = ticks;
-        PlaySound(path, parent);
+        if (PlaySound(path, parent))
+            LastSoundMsecByGroup[group] = ticks;
     }
 
     public static void PlayLogicalSound(string animName, Node? parent)
@@ -1053,27 +1249,97 @@ public static class TifiraAudioManager
         PlayAnimSound(animName, parent ?? ((SceneTree)Engine.GetMainLoop()).Root);
     }
 
-    private static void PlaySound(string path, Node parent)
+    public static void PreloadCoreSounds()
     {
-        var volume = MolingGlobalConfig.GlobalVolume * TifiraConfig.TifiraVolume;
-        if (volume <= 0.01f)
-            return;
+        foreach (var path in EnumerateKnownAudioPaths())
+            GetStream(path);
+    }
 
-        if (!AudioCache.TryGetValue(path, out var stream))
-        {
-            stream = ResourceLoader.Load<AudioStream>(path, null, ResourceLoader.CacheMode.Reuse);
-            if (stream == null)
-                return;
+    private static IEnumerable<string> EnumerateKnownAudioPaths()
+    {
+        yield return "res://TifiraDefectSkin/audio/enter.ogg";
+        yield return "res://TifiraDefectSkin/audio/victory.ogg";
+        yield return "res://TifiraDefectSkin/audio/hurt.ogg";
+        yield return "res://TifiraDefectSkin/audio/die.ogg";
+        yield return "res://TifiraDefectSkin/audio/idle_loop.ogg";
+        yield return "res://TifiraDefectSkin/audio/b_idle.ogg";
+        yield return "res://TifiraDefectSkin/audio/overgrowth_loop.ogg";
+        foreach (var path in AttackSounds)
+            yield return path;
+        foreach (var path in CastSounds)
+            yield return path;
+    }
+
+    private static AudioStream? GetStream(string path)
+    {
+        if (AudioCache.TryGetValue(path, out var stream))
+            return stream;
+
+        stream = ResourceLoader.Load<AudioStream>(path, null, ResourceLoader.CacheMode.Reuse);
+        if (stream != null)
             AudioCache[path] = stream;
-        }
+        return stream;
+    }
 
-        var player = new AudioStreamPlayer
+    private static string GetAudioGroup(string animName)
+    {
+        return animName switch
         {
-            Stream = stream,
-            VolumeDb = Mathf.LinearToDb(volume),
+            "attack" or "attack2" or "card_attack" => "attack",
+            "cast" or "cast2" or "cast3" or "cast4" or "card_casting" => "cast",
+            "victory_ready" or "victory" => "victory",
+            "idle_loop" => "idle",
+            "b_idle" => "shop_idle",
+            "overgrowth_loop" => "campfire_idle",
+            _ => animName,
         };
-        player.Finished += player.QueueFree;
-        parent.AddChild(player);
-        player.Play();
+    }
+
+    private static int GetAudioMinIntervalMs(string group)
+    {
+        return group switch
+        {
+            "attack" => 260,
+            "cast" => 260,
+            "hurt" => 320,
+            "enter" => 900,
+            "victory" => 1200,
+            "idle" => 12000,
+            "shop_idle" => 60000,
+            "campfire_idle" => 90000,
+            _ => 180,
+        };
+    }
+
+    private static bool PlaySound(string path, Node parent)
+    {
+        try
+        {
+            if (parent == null || !GodotObject.IsInstanceValid(parent))
+                return false;
+
+            var volume = MolingGlobalConfig.GlobalVolume * TifiraConfig.TifiraVolume;
+            if (volume <= 0.01f)
+                return false;
+
+            var stream = GetStream(path);
+            if (stream == null)
+                return false;
+
+            var player = new AudioStreamPlayer
+            {
+                Stream = stream,
+                VolumeDb = Mathf.LinearToDb(volume),
+            };
+            player.Finished += player.QueueFree;
+            parent.AddChild(player);
+            player.Play();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("[TifiraDefectSkin] play sound failed: " + path + " / " + ex.Message, 2);
+            return false;
+        }
     }
 }

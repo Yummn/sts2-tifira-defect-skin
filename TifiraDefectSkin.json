@@ -1,12 +1,12 @@
 {
-  "id": "TifiraDefectSkin",
-  "name": "蒂菲拉-故障机器人皮肤增强版",
-  "author": "原资源：B站/抖音：异色瞳墨灵；增强补丁：Codex",
-  "description": "故障机器人换皮Mod | 蒂菲拉(Tifira) | v1.1.1 增强：选角形象/背景、角色语音、战斗音效、战斗body、Battle Ready、充能球、普通/多段攻击、支援/防御、UG/UX大招演出；左侧 Battle Ready 演出加入入场/出场渐变。",
-  "version": "1.1.1",
-  "min_game_version": "0.103.0",
-  "has_pck": true,
-  "has_dll": true,
-  "dependencies": [],
-  "affects_gameplay": false
+    "id": "TifiraDefectSkin",
+    "name": "蒂菲拉故障机器人皮肤增强版",
+    "author": "原资源：B站/抖音：异色缸墨灵；增强补丁：Codex",
+    "description": "故障机器人替换为蒂菲拉（Tifira）的皮肤 Mod。v1.1.3 优化动画衔接：预加载常用资源、入场/出场/换皮淡入淡出、卡牌动作节流防止互相打断；同时修复语音/战斗音效重复触发导致的重音。保留选角形象/背景、角色语音、战斗音效、战斗 body、Battle Ready、充能球、普通/多段攻击、防御/支援、UG/UX 大招演出。",
+    "version": "1.1.3",
+    "min_game_version": "0.103.0",
+    "has_pck": true,
+    "has_dll": true,
+    "dependencies": [],
+    "affects_gameplay": false
 }
