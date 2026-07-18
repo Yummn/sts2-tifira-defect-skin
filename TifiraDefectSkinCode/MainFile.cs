@@ -74,7 +74,7 @@ public static class MainFile
         {
             harmony.PatchAll(Assembly.GetExecutingAssembly());
             ApplySafeReflectionPatches(harmony);
-            Log.Info("[TifiraDefectSkin] loaded v1.1.5 enhanced: Battle Ready starts from card play-zone/targeting instead of raw card press, with smoother gates/fades and de-duplicated voice playback.", 2);
+            Log.Info("[TifiraDefectSkin] loaded v1.1.6 enhanced: one combat voice per card, Battle Ready/card cut-in audio muted, and orb follow-up voice spam suppressed.", 2);
         }
         catch (Exception ex)
         {
@@ -231,6 +231,7 @@ public static class MainFile
                     return;
 
                 var anim = ChooseCardAnim(card);
+                TifiraAudioManager.BeginCardActionAudioGate(anim);
                 BattleReadyOverlay.NotifyBeforeCardPlayed(cardPlay);
                 PlayPlayerAnim(card.Owner, anim, returnIdle: true, cooldownMs: 120);
                 // The attached Spine animation_started listener plays the
@@ -270,7 +271,13 @@ public static class MainFile
             try
             {
                 if (player?.Character is Defect)
+                {
+                    // Orb channel/evoke hooks are follow-up visuals.  They often
+                    // fire after the card body animation and were causing one
+                    // card to play multiple cast voices on Android.
+                    TifiraAudioManager.SuppressNextAnimSound("cast3", 700);
                     PlayPlayerAnim(player, "cast3", returnIdle: true, cooldownMs: 250);
+                }
             }
             catch { }
         }
@@ -285,7 +292,12 @@ public static class MainFile
             {
                 var player = orb?.Owner;
                 if (player?.Character is Defect)
+                {
+                    // Keep the orb/beam animation, but do not let every evoked
+                    // orb start a fresh Tifira voice line.
+                    TifiraAudioManager.SuppressNextAnimSound("cast4", 900);
                     PlayPlayerAnim(player, "cast4", returnIdle: true, cooldownMs: 250);
+                }
             }
             catch { }
         }
@@ -1307,9 +1319,13 @@ public static class TifiraAudioManager
 {
     private static readonly Dictionary<string, AudioStream> AudioCache = new();
     private static readonly Dictionary<string, ulong> LastSoundMsecByGroup = new();
+    private static readonly Dictionary<string, ulong> SuppressedAnimSoundUntilMsec = new();
     private static ulong _lastIdlePlayTime;
     private static ulong _lastShopPlayTime;
     private static ulong _lastCampfirePlayTime;
+    private static ulong _cardActionAudioGateUntilMsec;
+    private static string _cardActionPreferredAnim = "";
+    private static bool _cardActionVoiceConsumed;
 
     private static readonly string[] AttackSounds =
     [
@@ -1326,8 +1342,17 @@ public static class TifiraAudioManager
 
     public static void PlayAnimSound(string animName, Node parent)
     {
+        if (string.IsNullOrEmpty(animName))
+            return;
+
         var ticks = Time.GetTicksMsec();
+        if (ShouldMuteAnimSound(animName, ticks))
+            return;
+
         var group = GetAudioGroup(animName);
+        if (!AllowCombatActionVoice(animName, group, ticks))
+            return;
+
         var minInterval = GetAudioMinIntervalMs(group);
         if (minInterval > 0 &&
             LastSoundMsecByGroup.TryGetValue(group, out var lastGroupPlay) &&
@@ -1340,8 +1365,8 @@ public static class TifiraAudioManager
         {
             "enter" => "res://TifiraDefectSkin/audio/enter.ogg",
             "victory_ready" or "victory" => "res://TifiraDefectSkin/audio/victory.ogg",
-            "attack" or "attack2" or "card_attack" => AttackSounds[(int)(GD.Randi() % AttackSounds.Length)],
-            "cast" or "cast2" or "cast3" or "cast4" or "card_casting" => CastSounds[(int)(GD.Randi() % CastSounds.Length)],
+            "attack" or "attack2" => AttackSounds[(int)(GD.Randi() % AttackSounds.Length)],
+            "cast" or "cast2" or "cast3" or "cast4" => CastSounds[(int)(GD.Randi() % CastSounds.Length)],
             "hurt" => "res://TifiraDefectSkin/audio/hurt.ogg",
             "die" => "res://TifiraDefectSkin/audio/die.ogg",
             "idle_loop" when ticks > _lastIdlePlayTime + 15000 && GD.Randf() < 0.30f => "res://TifiraDefectSkin/audio/idle_loop.ogg",
@@ -1357,6 +1382,28 @@ public static class TifiraAudioManager
         if (animName == "overgrowth_loop") _lastCampfirePlayTime = ticks;
         if (PlaySound(path, parent))
             LastSoundMsecByGroup[group] = ticks;
+    }
+
+    public static void BeginCardActionAudioGate(string preferredAnim)
+    {
+        try
+        {
+            _cardActionPreferredAnim = preferredAnim ?? "";
+            _cardActionVoiceConsumed = false;
+            _cardActionAudioGateUntilMsec = Time.GetTicksMsec() + 2600UL;
+        }
+        catch { }
+    }
+
+    public static void SuppressNextAnimSound(string animName, int durationMs)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(animName))
+                return;
+            SuppressedAnimSoundUntilMsec[animName] = Time.GetTicksMsec() + (ulong)Math.Max(80, durationMs);
+        }
+        catch { }
     }
 
     public static void PlayLogicalSound(string animName, Node? parent)
@@ -1400,8 +1447,8 @@ public static class TifiraAudioManager
     {
         return animName switch
         {
-            "attack" or "attack2" or "card_attack" => "attack",
-            "cast" or "cast2" or "cast3" or "cast4" or "card_casting" => "cast",
+            "attack" or "attack2" => "attack",
+            "cast" or "cast2" or "cast3" or "cast4" => "cast",
             "victory_ready" or "victory" => "victory",
             "idle_loop" => "idle",
             "b_idle" => "shop_idle",
@@ -1414,8 +1461,8 @@ public static class TifiraAudioManager
     {
         return group switch
         {
-            "attack" => 260,
-            "cast" => 260,
+            "attack" => 950,
+            "cast" => 950,
             "hurt" => 320,
             "enter" => 900,
             "victory" => 1200,
@@ -1424,6 +1471,69 @@ public static class TifiraAudioManager
             "campfire_idle" => 90000,
             _ => 180,
         };
+    }
+
+    private static bool ShouldMuteAnimSound(string animName, ulong ticks)
+    {
+        // Battle Ready cut-in animations are visual feedback only.  Let the
+        // player's body animation provide the one audible card voice.
+        if (animName is "card_attack" or "card_casting")
+            return true;
+
+        if (SuppressedAnimSoundUntilMsec.TryGetValue(animName, out var until))
+        {
+            if (ticks <= until)
+            {
+                SuppressedAnimSoundUntilMsec.Remove(animName);
+                if (_cardActionAudioGateUntilMsec != 0 &&
+                    ticks <= _cardActionAudioGateUntilMsec &&
+                    !_cardActionVoiceConsumed &&
+                    string.Equals(animName, _cardActionPreferredAnim, StringComparison.Ordinal))
+                {
+                    // A card whose main animation is cast4 should still get
+                    // its single voice even if an orb hook queued a cast4 mute
+                    // in the same frame.
+                    return false;
+                }
+                return true;
+            }
+            SuppressedAnimSoundUntilMsec.Remove(animName);
+        }
+
+        return false;
+    }
+
+    private static bool AllowCombatActionVoice(string animName, string group, ulong ticks)
+    {
+        if (group is not ("attack" or "cast"))
+            return true;
+
+        if (_cardActionAudioGateUntilMsec != 0 && ticks <= _cardActionAudioGateUntilMsec)
+        {
+            if (_cardActionVoiceConsumed)
+                return false;
+
+            // If an orb follow-up somehow races ahead of the main body anim,
+            // do not let it consume the card's single voice slot unless the
+            // chosen card animation itself is the same high-tier cast.
+            if ((animName is "cast3" or "cast4") &&
+                !string.Equals(animName, _cardActionPreferredAnim, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            _cardActionVoiceConsumed = true;
+            return true;
+        }
+
+        if (_cardActionAudioGateUntilMsec != 0 && ticks > _cardActionAudioGateUntilMsec)
+        {
+            _cardActionAudioGateUntilMsec = 0;
+            _cardActionPreferredAnim = "";
+            _cardActionVoiceConsumed = false;
+        }
+
+        return true;
     }
 
     private static bool PlaySound(string path, Node parent)

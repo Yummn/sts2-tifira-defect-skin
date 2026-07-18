@@ -1,4 +1,4 @@
-# 蒂菲拉故障机器人皮肤增强版 (TifiraDefectSkin) v1.1.5
+﻿# 蒂菲拉故障机器人皮肤增强版 (TifiraDefectSkin) v1.1.6
 
 Slay the Spire 2 故障机器人皮肤替换/增强 MOD。下载 Releases 里的 zip，解压后把 `TifiraDefectSkin` 文件夹复制到游戏 `mods/` 目录。
 
@@ -7,23 +7,25 @@ Slay the Spire 2 故障机器人皮肤替换/增强 MOD。下载 Releases 里的
 - 将故障机器人替换为《卡厄斯梦境》的蒂菲拉。
 - 选角界面替换为蒂菲拉主题形象，并提供“切换背景”按钮。
 - 战斗 body 替换为蒂菲拉 Spine，进场后进入待机。
-- 卡牌进入出牌区/目标选择流程后显示左侧 Battle Ready 立绘演出，普通点牌/查看卡牌不再触发，打出攻击/技能时切换对应 cut-in。
+- 卡牌进入出牌区/目标选择流程后显示左侧 Battle Ready 立绘演出，普通点牌/查看卡牌不再触发。
+- v1.1.6 起一张卡牌只允许一次战斗语音；Battle Ready 的 `card_attack` / `card_casting` 只保留演出不单独发声；充能球充能/激发后续动画静音，避免一张牌或球连击持续触发多段语音。
 - 普通攻击、多段/群体攻击、防御/支援、充能球充能/激发、受击、胜利等动作绑定到对应资源。
 - 绑定原资源包内的角色语音与战斗音效。
 - 不改动卡牌数值，不影响玩法。
 
+## v1.1.6 修复
+
+- 视频音频分析显示重复峰值集中在出牌后球/光束连击阶段，判断为 body 动作、Battle Ready cut-in、球充能/激发 Hook 同时触发语音。
+- 新增卡牌语音窗口：`BeforeCardPlayed` 开始后 2.6 秒内同一张卡只消耗一次 attack/cast 语音槽。
+- `card_attack` / `card_casting` 改为纯视觉，不再从 Battle Ready cut-in 额外播放攻击/施法语音。
+- `AfterOrbChanneled` / `AfterOrbEvoked` 仍播放 `cast3` / `cast4` 角色动作，但对应声音被静音，防止每个球都触发一遍 cast 语音。
+- attack/cast 全局最小间隔从 260ms 提高到 950ms，兜底防止多 Hook 近距离连发。
+
 ## v1.1.5 修复
 
 - 手机端性能：Battle Ready 不再绑定 raw card press，改为绑定 `NCardPlay.TryShowEvokingOrbs`，只有卡牌进入出牌区/目标选择流程后才拉起左侧大立绘。
-- 查看卡牌：普通点牌/选中/查看卡牌停留 1 秒以上也不会再触发左侧 Battle Ready，减少视频中那类反复切入造成的掉帧。
-- 触发节流：Battle Ready 增加重开冷却；手机端跳过高频 `b_into` 重播，优先复用 `b_idle`，降低 Spine 重绘压力。
-
-## v1.1.3 修复
-
-- 动画衔接：给战斗 body、选角背景、Battle Ready 增加淡入/淡出，减少直接闪现。
-- 动画节流：攻击、施法、受击等动作加优先级和短锁定，避免同一张牌/同一帧多个 Hook 互相打断造成卡顿。
-- 资源预加载：启动时预热常用 Spine/Audio 资源，降低首次触发卡顿。
-- 语音去重：移除出牌 Hook 中的第二路音频触发，统一由 Spine `animation_started` 监听播放；同时按音频组增加最小间隔，避免 Android 上重复播放产生重音。
+- 查看卡牌：普通点牌/选中/查看卡牌停留 1 秒以上也不会再触发左侧 Battle Ready。
+- 触发节流：Battle Ready 增加重开冷却；手机端跳过高频 `b_into` 重播，优先复用 `b_idle`。
 
 ## 资源来源
 
@@ -36,9 +38,9 @@ Slay the Spire 2 故障机器人皮肤替换/增强 MOD。下载 Releases 里的
 - 战斗 body：`res://TifiraDefectSkin/tifirabody/Tifira.tres`；战斗进场播放 `enter -> idle_loop`。
 - 商店/休息等通用 Spine 替换：同一个 `Tifira.tres`；商店偏向 `b_idle`，休息处偏向 `overgrowth_loop`。
 - 选角背景：`res://scenes/character_select_bg/defect/character_select_bg.tscn` 与 `res://scenes/character_select_bg/defect2/characterselect_defect_live.tscn`。
-- 左侧 Battle Ready：`res://TifiraDefectSkin/vfx/battle_ready_point.tscn`，内部引用 `res://TifiraDefectSkin/vfx/tifira_battle_ready.tres`；v1.1.5 起卡牌进入出牌区/目标选择流程后才触发，PC 播放 `b_into -> b_idle`，手机端优先直接进入 `b_idle` 以减少高频切入卡顿；打出攻击牌播放 `card_attack`，打出非攻击牌播放 `card_casting`，取消播放 `b_out`，外层 CanvasItem 负责淡入淡出。
+- 左侧 Battle Ready：`res://TifiraDefectSkin/vfx/battle_ready_point.tscn`，内部引用 `res://TifiraDefectSkin/vfx/tifira_battle_ready.tres`；v1.1.5 起卡牌进入出牌区/目标选择流程后才触发，PC 播放 `b_into -> b_idle`，手机端优先直接进入 `b_idle` 以减少高频切入卡顿；`card_attack` / `card_casting` 自 v1.1.6 起只作为视觉演出，不再单独发声。
 - 普通攻击：`attack`；多段/群体攻击：`attack2`；格挡/防御/支援：`cast2`；充能球充能：`cast3`；充能球激发、稀有牌、3 费以上或 UG/UX/大招类：`cast4`；受击：`hurt`；胜利：`victory_ready -> victory`。
-- 音频：`attack*.ogg` 对应攻击，`cast*.ogg` 对应施法/防御/充能球/大招，`enter.ogg` 对应入场，`hurt.ogg` 对应受击，`victory.ogg` 对应胜利，`idle_loop.ogg` / `b_idle.ogg` / `overgrowth_loop.ogg` 是带冷却的待机/商店/休息语音。
+- 音频：`attack*.ogg` 对应攻击，`cast*.ogg` 对应主卡牌施法/防御/大招；充能球后续 `cast3` / `cast4` 默认静音只保留动作，`enter.ogg` 对应入场，`hurt.ogg` 对应受击，`victory.ogg` 对应胜利，`idle_loop.ogg` / `b_idle.ogg` / `overgrowth_loop.ogg` 是带冷却的待机/商店/休息语音。
 
 ## 当前保留但未主动触发的资源
 
@@ -54,4 +56,5 @@ Slay the Spire 2 故障机器人皮肤替换/增强 MOD。下载 Releases 里的
 - v1.1.1：左侧 Battle Ready cut-in 增加入场/出场渐变；补全资源来源、动作绑定与未主动触发资源记录。
 - v1.1.2：修复 v1.1.1 包内 `TifiraDefectSkin.json` 描述字段缺少结束引号导致 manifest 不是合法 JSON 的问题。
 - v1.1.3：优化动画衔接、资源预加载、动作节流，并修复语音/战斗音效重复播放导致的重音。
-- v1.1.5：按用户视频反馈进一步优化手机端性能；Battle Ready 不再绑定 raw card press，而是绑定 NCardPlay 进入出牌区/目标选择阶段，普通点牌/查看卡牌不再弹左侧大立绘，并加入重开冷却。
+- v1.1.5：Battle Ready 不再绑定 raw card press，而是绑定 NCardPlay 进入出牌区/目标选择阶段，普通点牌/查看卡牌不再弹左侧大立绘。
+- v1.1.6：修复一张牌和充能球连击触发多次语音；每张卡只允许一次战斗语音，Battle Ready cut-in 和球后续动画静音。
