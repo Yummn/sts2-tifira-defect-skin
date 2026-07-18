@@ -1,0 +1,8 @@
+﻿.godot/
+bin/
+obj/
+*.dll
+*.pdb
+*.user
+*.suo
+.vs/

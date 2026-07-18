@@ -1,0 +1,41 @@
+<Project Sdk="Godot.NET.Sdk/4.5.1" InitialTargets="CheckDependencyPaths">
+  <Import Project=".\Sts2PathDiscovery.props" />
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>true</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>TifiraDefectSkin</RootNamespace>
+    <AssemblyName>TifiraDefectSkin</AssemblyName>
+    <AppOutputBase>$(MSBuildProjectDirectory)\</AppOutputBase>
+    <PathMap>$(AppOutputBase)=.\</PathMap>
+    <GodotDisabledSourceGenerators>GodotPluginsInitializer</GodotDisabledSourceGenerators>
+    <NoWarn>$(NoWarn);MSB3270</NoWarn>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup Condition="Exists('$(Sts2DataDir)')">
+    <Reference Include="0Harmony"><HintPath>$(Sts2DataDir)/0Harmony.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="sts2"><HintPath>$(Sts2DataDir)/sts2.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="TifiraDefectSkinCode\**\*.cs" />
+    <None Include="TifiraDefectSkin.json" />
+    <None Include="TifiraDefectSkin.pck" Condition="Exists('TifiraDefectSkin.pck')" />
+  </ItemGroup>
+
+  <Target Name="CheckDependencyPaths">
+    <Error Text="Slay the Spire 2 data not found at path '$(Sts2DataDir)'." Condition="'$(Sts2DataDir)' == '' or !Exists('$(Sts2DataDir)')" />
+  </Target>
+
+  <Target Name="CopyToModsFolderOnBuild" AfterTargets="Build" Condition="Exists('$(Sts2Path)') and '$(SkipCopyToMods)' != 'true'">
+    <Message Text="Installing TifiraDefectSkin to $(ModsPath)TifiraDefectSkin/" Importance="high" />
+    <MakeDir Directories="$(ModsPath)TifiraDefectSkin/" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(ModsPath)TifiraDefectSkin/" />
+    <Copy SourceFiles="TifiraDefectSkin.json" DestinationFolder="$(ModsPath)TifiraDefectSkin/" />
+    <Copy SourceFiles="TifiraDefectSkin.pck" DestinationFolder="$(ModsPath)TifiraDefectSkin/" Condition="Exists('TifiraDefectSkin.pck')" />
+    <Copy SourceFiles="$(TargetDir)$(TargetName).pdb" DestinationFolder="$(ModsPath)TifiraDefectSkin/" Condition="Exists('$(TargetDir)$(TargetName).pdb')" />
+  </Target>
+</Project>
