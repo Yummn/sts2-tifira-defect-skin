@@ -213,7 +213,7 @@ public static class MainFile
     [HarmonyPatch(typeof(Hook), nameof(Hook.BeforeCardPlayed))]
     private static class BeforeCardPlayedPatch
     {
-        private static void Prefix(ICombatState combatState, CardPlay cardPlay)
+        private static void Prefix(object combatState, CardPlay cardPlay)
         {
             try
             {
@@ -236,7 +236,7 @@ public static class MainFile
     [HarmonyPatch(typeof(Hook), nameof(Hook.AfterBlockGained))]
     private static class AfterBlockGainedPatch
     {
-        private static void Prefix(ICombatState combatState, Creature creature, decimal amount, ValueProp props, CardModel? cardSource)
+        private static void Prefix(object combatState, Creature creature, decimal amount, ValueProp props, CardModel? cardSource)
         {
             try
             {
@@ -253,7 +253,7 @@ public static class MainFile
     [HarmonyPatch(typeof(Hook), nameof(Hook.AfterOrbChanneled))]
     private static class AfterOrbChanneledPatch
     {
-        private static void Prefix(ICombatState combatState, PlayerChoiceContext choiceContext, Player player, OrbModel orb)
+        private static void Prefix(object combatState, PlayerChoiceContext choiceContext, Player player, OrbModel orb)
         {
             try
             {
@@ -267,7 +267,7 @@ public static class MainFile
     [HarmonyPatch(typeof(Hook), nameof(Hook.AfterOrbEvoked))]
     private static class AfterOrbEvokedPatch
     {
-        private static void Prefix(PlayerChoiceContext choiceContext, ICombatState combatState, OrbModel orb, IEnumerable<Creature> targets)
+        private static void Prefix(PlayerChoiceContext choiceContext, object combatState, OrbModel orb, IEnumerable<Creature> targets)
         {
             try
             {
@@ -282,7 +282,7 @@ public static class MainFile
     [HarmonyPatch(typeof(Hook), nameof(Hook.AfterDamageReceived))]
     private static class AfterDamageReceivedPatch
     {
-        private static void Prefix(PlayerChoiceContext choiceContext, IRunState runState, ICombatState? combatState, Creature target, DamageResult result, ValueProp props, Creature? dealer, CardModel? cardSource)
+        private static void Prefix(PlayerChoiceContext choiceContext, IRunState runState, object? combatState, Creature target, DamageResult result, ValueProp props, Creature? dealer, CardModel? cardSource)
         {
             try
             {
@@ -296,7 +296,7 @@ public static class MainFile
     [HarmonyPatch(typeof(Hook), nameof(Hook.AfterCombatVictory))]
     private static class AfterCombatVictoryPatch
     {
-        private static void Postfix(IRunState runState, ICombatState? combatState, CombatRoom room)
+        private static void Postfix(IRunState runState, object? combatState, CombatRoom room)
         {
             try
             {
@@ -435,15 +435,16 @@ public static class MainFile
         {
             AttachAudioListener(spine);
             var sprite = new MegaSprite(spine);
-            if (sprite.TryGetAnimationState() == null)
+            var state = TryGetAnimationStateCompat(sprite);
+            if (state == null)
                 continue;
-            var names = sprite.GetSkeleton()?.GetData()?.GetAnimationNames();
-            var anim = names?.FirstOrDefault() ?? "b_idle";
-            if (sprite.HasAnimation("b_idle")) anim = "b_idle";
+            var anim = "b_idle";
+            if (!sprite.HasAnimation(anim) && sprite.HasAnimation("idle_loop")) anim = "idle_loop";
+            if (!sprite.HasAnimation(anim) && sprite.HasAnimation("enter")) anim = "enter";
             if (sprite.HasAnimation(anim))
             {
-                sprite.GetAnimationState().SetAnimation(anim, true);
-                sprite.GetAnimationState().SetTimeScale(1.05f);
+                state.SetAnimation(anim, true);
+                state.SetTimeScale(1.05f);
             }
         }
     }
@@ -634,7 +635,7 @@ public static class MainFile
             if (!sprite.HasAnimation(anim))
                 return false;
 
-            var state = sprite.TryGetAnimationState();
+            var state = TryGetAnimationStateCompat(sprite);
             if (state == null)
                 return false;
 
@@ -659,6 +660,23 @@ public static class MainFile
         if (sprite.HasAnimation("idle_loop")) return "idle_loop";
         if (sprite.HasAnimation("b_idle")) return "b_idle";
         return requested;
+    }
+
+    private static MegaAnimationState? TryGetAnimationStateCompat(MegaSprite sprite)
+    {
+        try
+        {
+            // v0.107 added TryGetAnimationState(); v0.103 only has GetAnimationState().
+            var tryMethod = typeof(MegaSprite).GetMethod("TryGetAnimationState", Type.EmptyTypes);
+            if (tryMethod != null)
+                return tryMethod.Invoke(sprite, null) as MegaAnimationState;
+
+            return sprite.GetAnimationState();
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static IEnumerable<Node2D> CollectSpineNodes(Node root)
@@ -789,7 +807,6 @@ public static class MainFile
             _played = false;
             _token++;
             PlayOnSprite(_sprite, _sprite.HasAnimation("b_into") ? "b_into" : "b_idle", "b_idle", loopNext: true, force: true);
-            card.Played += OnActiveCardPlayed;
         }
 
         public static void NotifyReleased(CardModel card)
@@ -812,6 +829,7 @@ public static class MainFile
             _played = true;
             var anim = cardPlay.Card.Type == CardType.Attack ? "card_attack" : "card_casting";
             PlayOnSprite(_sprite, anim, null, loopNext: false, force: true);
+            _ = HideSoon(_token);
         }
 
         private static async Task WaitThenOut(ulong token)
@@ -846,17 +864,18 @@ public static class MainFile
 
         private static void Hide()
         {
-            try
-            {
-                if (_activeCard != null)
-                    _activeCard.Played -= OnActiveCardPlayed;
-            }
-            catch { }
             _activeCard = null;
             _busy = false;
             _played = false;
             if (_node is CanvasItem ci)
                 ci.Visible = false;
+        }
+
+        private static async Task HideSoon(ulong token)
+        {
+            await Task.Delay(900);
+            if (_busy && _played && token == _token)
+                Hide();
         }
     }
 }
