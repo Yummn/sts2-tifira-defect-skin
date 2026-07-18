@@ -65,7 +65,7 @@ public static class MainFile
         {
             harmony.PatchAll(Assembly.GetExecutingAssembly());
             ApplySafeReflectionPatches(harmony);
-            Log.Info("[TifiraDefectSkin] loaded v1.1.0 enhanced: select art, voice, combat body, battle ready, attack/cast/block/orb/victory/death animation triggers.", 2);
+            Log.Info("[TifiraDefectSkin] loaded v1.1.1 enhanced: select art, voice, combat body, battle ready with fade-in/fade-out, attack/cast/block/orb/victory/death animation triggers.", 2);
         }
         catch (Exception ex)
         {
@@ -749,6 +749,9 @@ public static class MainFile
         private static bool _busy;
         private static bool _played;
         private static ulong _token;
+        private static Tween? _fadeTween;
+        private const double FadeInSeconds = 0.18;
+        private const double FadeOutSeconds = 0.22;
 
         public static void InitializePreload()
         {
@@ -769,6 +772,7 @@ public static class MainFile
                 if (inst is CanvasItem ci)
                 {
                     ci.Visible = false;
+                    ci.Modulate = WithAlpha(ci.Modulate, 0f);
                     ci.ZIndex = 30;
                 }
 
@@ -799,13 +803,11 @@ public static class MainFile
             if (_node == null || _sprite == null)
                 return;
 
-            if (_node is CanvasItem ci)
-                ci.Visible = true;
-
             _activeCard = card;
             _busy = true;
             _played = false;
             _token++;
+            FadeIn(_token);
             PlayOnSprite(_sprite, _sprite.HasAnimation("b_into") ? "b_into" : "b_idle", "b_idle", loopNext: true, force: true);
         }
 
@@ -855,27 +857,96 @@ public static class MainFile
             {
                 _played = true;
                 PlayOnSprite(_sprite, "b_out", null, loopNext: false, force: true);
+                _ = FadeOutAfterDelay(_token, 180);
             }
             else
             {
-                Hide();
+                FadeOutAndHide(_token);
             }
         }
 
         private static void Hide()
         {
+            FadeOutAndHide(_token);
+        }
+
+        private static void HideImmediate()
+        {
             _activeCard = null;
             _busy = false;
             _played = false;
+            KillFadeTween();
             if (_node is CanvasItem ci)
+            {
                 ci.Visible = false;
+                ci.Modulate = WithAlpha(ci.Modulate, 0f);
+            }
         }
 
         private static async Task HideSoon(ulong token)
         {
             await Task.Delay(900);
             if (_busy && _played && token == _token)
-                Hide();
+                FadeOutAndHide(token);
+        }
+
+        private static async Task FadeOutAfterDelay(ulong token, int delayMs)
+        {
+            await Task.Delay(delayMs);
+            if (_busy && token == _token)
+                FadeOutAndHide(token);
+        }
+
+        private static void FadeIn(ulong token)
+        {
+            if (token != _token)
+                return;
+            if (_node is not CanvasItem ci)
+                return;
+
+            KillFadeTween();
+            ci.Visible = true;
+            ci.Modulate = WithAlpha(ci.Modulate, 0f);
+            _fadeTween = ci.CreateTween();
+            _fadeTween.SetTrans(Tween.TransitionType.Sine);
+            _fadeTween.SetEase(Tween.EaseType.Out);
+            _fadeTween.TweenProperty(ci, "modulate", WithAlpha(ci.Modulate, 1f), FadeInSeconds);
+        }
+
+        private static void FadeOutAndHide(ulong token)
+        {
+            if (_node is not CanvasItem ci)
+            {
+                HideImmediate();
+                return;
+            }
+
+            KillFadeTween();
+            _fadeTween = ci.CreateTween();
+            _fadeTween.SetTrans(Tween.TransitionType.Sine);
+            _fadeTween.SetEase(Tween.EaseType.In);
+            _fadeTween.TweenProperty(ci, "modulate", WithAlpha(ci.Modulate, 0f), FadeOutSeconds);
+            _fadeTween.TweenCallback(Callable.From(() =>
+            {
+                if (token == _token)
+                    HideImmediate();
+            }));
+        }
+
+        private static void KillFadeTween()
+        {
+            try
+            {
+                if (_fadeTween != null && GodotObject.IsInstanceValid(_fadeTween))
+                    _fadeTween.Kill();
+            }
+            catch { }
+            _fadeTween = null;
+        }
+
+        private static Color WithAlpha(Color color, float alpha)
+        {
+            return new Color(color.R, color.G, color.B, alpha);
         }
     }
 }
