@@ -1,4 +1,4 @@
-﻿# 蒂菲拉故障机器人皮肤增强版 (TifiraDefectSkin) v1.1.6
+# 蒂菲拉故障机器人皮肤增强版 (TifiraDefectSkin) v1.1.7
 
 Slay the Spire 2 故障机器人皮肤替换/增强 MOD。下载 Releases 里的 zip，解压后把 `TifiraDefectSkin` 文件夹复制到游戏 `mods/` 目录。
 
@@ -9,9 +9,18 @@ Slay the Spire 2 故障机器人皮肤替换/增强 MOD。下载 Releases 里的
 - 战斗 body 替换为蒂菲拉 Spine，进场后进入待机。
 - 卡牌进入出牌区/目标选择流程后显示左侧 Battle Ready 立绘演出，普通点牌/查看卡牌不再触发。
 - v1.1.6 起一张卡牌只允许一次战斗语音；Battle Ready 的 `card_attack` / `card_casting` 只保留演出不单独发声；充能球充能/激发后续动画静音，避免一张牌或球连击持续触发多段语音。
+- v1.1.7 优化手机端常驻开销与入场观感：隐藏的 Battle Ready Spine 会休眠、语音播放器复用，角色 body 与左侧立绘以更柔和的渐变进入。
 - 普通攻击、多段/群体攻击、防御/支援、充能球充能/激发、受击、胜利等动作绑定到对应资源。
 - 绑定原资源包内的角色语音与战斗音效。
 - 不改动卡牌数值，不影响玩法。
+
+## v1.1.7 手机性能与入场优化
+
+- 隐藏状态下把 Battle Ready 节点切换为 `ProcessMode.Disabled`，显示前恢复；避免不可见的 Spine 动画仍在每帧更新。
+- 语音播放由“每次创建并 `QueueFree` 一个 `AudioStreamPlayer`”改为最多 3 个播放器循环复用，降低快速出牌/充能球连段时的节点分配和 GC 峰值。
+- 取消启动时一次性预载全部语音，改用 Godot `CacheMode.Reuse` 按需加载，每个音频资源每个进程最多加载一次。
+- 手机战斗 body 入场渐变由 0.18 秒延长到 0.32 秒，并改为缓入缓出。
+- 手机左侧 Battle Ready 入场渐变由 0.10 秒延长到 0.26 秒；先切到正确动画首帧再显示，消除旧姿势闪现。
 
 ## v1.1.6 修复
 
@@ -58,3 +67,4 @@ Slay the Spire 2 故障机器人皮肤替换/增强 MOD。下载 Releases 里的
 - v1.1.3：优化动画衔接、资源预加载、动作节流，并修复语音/战斗音效重复播放导致的重音。
 - v1.1.5：Battle Ready 不再绑定 raw card press，而是绑定 NCardPlay 进入出牌区/目标选择阶段，普通点牌/查看卡牌不再弹左侧大立绘。
 - v1.1.6：修复一张牌和充能球连击触发多次语音；每张卡只允许一次战斗语音，Battle Ready cut-in 和球后续动画静音。
+- v1.1.7：隐藏 Battle Ready 时暂停 Spine 处理，音频播放器三槽复用并按需加载；手机 body/Battle Ready 入场分别延长到 0.32/0.26 秒并修复首帧闪现。

@@ -55,6 +55,7 @@ public static class MainFile
     private static readonly Dictionary<string, AnimGateState> AnimGateByKey = new();
     private static Resource? _bodySkin;
     private static int _currentBgIndex;
+    private static bool? _isMobileRuntime;
 
     public static void Init()
     {
@@ -74,7 +75,7 @@ public static class MainFile
         {
             harmony.PatchAll(Assembly.GetExecutingAssembly());
             ApplySafeReflectionPatches(harmony);
-            Log.Info("[TifiraDefectSkin] loaded v1.1.6 enhanced: one combat voice per card, Battle Ready/card cut-in audio muted, and orb follow-up voice spam suppressed.", 2);
+            Log.Info("[TifiraDefectSkin] loaded v1.1.7 mobile optimized: pooled audio, sleeping hidden cut-in, and smoother entry fades.", 2);
         }
         catch (Exception ex)
         {
@@ -515,7 +516,12 @@ public static class MainFile
             PlayOnSprite(sprite, "enter", "idle_loop", loopNext: true, force: true);
         else
             PlayOnSprite(sprite, "idle_loop", null, loopNext: true, force: true);
-        FadeCanvasItemIn(body, 0.18, bodyFadeBase.A <= 0f ? 1f : bodyFadeBase.A);
+        // A 0.18 s ease-out made the model appear almost instantly on high-DPI
+        // phones.  Keep the PC transition responsive, but give Android a softer
+        // ease-in/out so the first visible frame no longer looks like a pop-in.
+        FadeCanvasItemIn(body, IsMobileRuntime() ? 0.32 : 0.22,
+            bodyFadeBase.A <= 0f ? 1f : bodyFadeBase.A,
+            gentleStart: IsMobileRuntime());
     }
 
     private static void ApplyFirstSpineChild(Node root, float scale, Vector2 offset, string preferredAnim, bool loop)
@@ -539,7 +545,9 @@ public static class MainFile
             spine.Scale = new Vector2(Mathf.Abs(spine.Scale.X) * scale, Mathf.Abs(spine.Scale.Y) * scale);
             spine.Position += offset;
             PlayOnSprite(sprite, preferredAnim, null, loopNext: loop, force: true);
-            FadeCanvasItemIn(spine, 0.14, fadeBase.A <= 0f ? 1f : fadeBase.A);
+            FadeCanvasItemIn(spine, IsMobileRuntime() ? 0.24 : 0.16,
+                fadeBase.A <= 0f ? 1f : fadeBase.A,
+                gentleStart: IsMobileRuntime());
         }
     }
 
@@ -566,7 +574,9 @@ public static class MainFile
             sprite.SetSkeletonDataRes(new MegaSkeletonDataResource(skin));
             spine.Scale *= 1.3f;
             PlayOnSprite(sprite, sprite.HasAnimation("idle_loop") ? "idle_loop" : "b_idle", null, loopNext: true, force: true);
-            FadeCanvasItemIn(spine, 0.14, fadeBase.A <= 0f ? 1f : fadeBase.A);
+            FadeCanvasItemIn(spine, IsMobileRuntime() ? 0.24 : 0.16,
+                fadeBase.A <= 0f ? 1f : fadeBase.A,
+                gentleStart: IsMobileRuntime());
         }
     }
 
@@ -587,14 +597,10 @@ public static class MainFile
         }
         catch { }
 
-        try
-        {
-            // Keep the first card-use / first combat transition smooth by
-            // warming up the most frequently used audio streams.  The battle
-            // ready scene itself is still instantiated lazily per combat room.
-            TifiraAudioManager.PreloadCoreSounds();
-        }
-        catch { }
+        // Audio is intentionally lazy-loaded.  Loading every voice during mod
+        // initialization increased Android startup memory and created a large
+        // one-frame spike.  GetStream still uses Godot's reuse cache, so every
+        // clip is loaded at most once per process.
     }
 
     private static Player? ResolvePlayerForIndexedScene(object? room, int index)
@@ -785,7 +791,7 @@ public static class MainFile
         };
     }
 
-    private static void FadeCanvasItemIn(CanvasItem? item, double seconds, float targetAlpha = 1f)
+    private static void FadeCanvasItemIn(CanvasItem? item, double seconds, float targetAlpha = 1f, bool gentleStart = false)
     {
         try
         {
@@ -795,7 +801,7 @@ public static class MainFile
             item.Visible = true;
             var tween = item.CreateTween();
             tween.SetTrans(Tween.TransitionType.Sine);
-            tween.SetEase(Tween.EaseType.Out);
+            tween.SetEase(gentleStart ? Tween.EaseType.InOut : Tween.EaseType.Out);
             tween.TweenProperty(item, "modulate", WithAlpha(item.Modulate, targetAlpha), seconds);
         }
         catch { }
@@ -827,6 +833,26 @@ public static class MainFile
     private static Color WithAlpha(Color color, float alpha)
     {
         return new Color(color.R, color.G, color.B, alpha);
+    }
+
+    internal static bool IsMobileRuntime()
+    {
+        if (_isMobileRuntime.HasValue)
+            return _isMobileRuntime.Value;
+
+        try
+        {
+            var osName = Godot.OS.GetName();
+            _isMobileRuntime =
+                Godot.OS.HasFeature("android") ||
+                osName.Contains("Android", StringComparison.OrdinalIgnoreCase) ||
+                osName.Contains("iOS", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            _isMobileRuntime = false;
+        }
+        return _isMobileRuntime.Value;
     }
 
     private static string FallbackAnim(MegaSprite sprite, string requested)
@@ -932,7 +958,6 @@ public static class MainFile
         private static ulong _pendingToken;
         private static ulong _lastOverlayStartMsec;
         private static Tween? _fadeTween;
-        private static bool? _isMobileRuntime;
         private const int PcHoldDelayMs = 160;
         private const int MobileHoldDelayMs = 360;
         private const int OverlayReopenCooldownMs = 650;
@@ -955,6 +980,10 @@ public static class MainFile
                 var parent = (Node?)NCombatRoom.Instance?.CombatVfxContainer ?? NCombatRoom.Instance;
                 parent?.AddChild(inst);
                 _node = inst;
+                // A hidden SpineSprite still advances its skeleton unless its
+                // process tree is paused.  Sleeping the cut-in while invisible
+                // removes that permanent per-frame cost on Android.
+                inst.ProcessMode = Node.ProcessModeEnum.Disabled;
 
                 if (inst is CanvasItem ci)
                 {
@@ -1045,9 +1074,11 @@ public static class MainFile
             _played = false;
             _fadingOut = false;
             _token++;
-            FadeIn(_token);
             var introAnim = _sprite.HasAnimation("b_into") && !IsMobileRuntime() ? "b_into" : "b_idle";
             PlayOnSprite(_sprite, introAnim, "b_idle", loopNext: true, force: true);
+            // Select the first pose before exposing the canvas.  Doing this in
+            // the old order could reveal one stale Spine frame as a flash.
+            FadeIn(_token);
         }
 
         public static void NotifyReleased(CardModel card)
@@ -1135,6 +1166,8 @@ public static class MainFile
                 ci.Visible = false;
                 ci.Modulate = WithAlpha(ci.Modulate, 0f);
             }
+            if (_node != null && GodotObject.IsInstanceValid(_node))
+                _node.ProcessMode = Node.ProcessModeEnum.Disabled;
         }
 
         private static void HideSoon(ulong token)
@@ -1172,12 +1205,14 @@ public static class MainFile
                 return;
 
             KillFadeTween();
+            if (_node != null && GodotObject.IsInstanceValid(_node))
+                _node.ProcessMode = Node.ProcessModeEnum.Inherit;
             ci.Visible = true;
             ci.Modulate = WithAlpha(ci.Modulate, 0f);
             _fadeTween = ci.CreateTween();
             _fadeTween.SetTrans(Tween.TransitionType.Sine);
-            _fadeTween.SetEase(Tween.EaseType.Out);
-            _fadeTween.TweenProperty(ci, "modulate", WithAlpha(ci.Modulate, 1f), IsMobileRuntime() ? 0.10 : 0.18);
+            _fadeTween.SetEase(IsMobileRuntime() ? Tween.EaseType.InOut : Tween.EaseType.Out);
+            _fadeTween.TweenProperty(ci, "modulate", WithAlpha(ci.Modulate, 1f), IsMobileRuntime() ? 0.26 : 0.20);
         }
 
         private static void FadeOutAndHide(ulong token)
@@ -1243,22 +1278,7 @@ public static class MainFile
 
         private static bool IsMobileRuntime()
         {
-            if (_isMobileRuntime.HasValue)
-                return _isMobileRuntime.Value;
-
-            try
-            {
-                var osName = Godot.OS.GetName();
-                _isMobileRuntime =
-                    Godot.OS.HasFeature("android") ||
-                    osName.Contains("Android", StringComparison.OrdinalIgnoreCase) ||
-                    osName.Contains("iOS", StringComparison.OrdinalIgnoreCase);
-            }
-            catch
-            {
-                _isMobileRuntime = false;
-            }
-            return _isMobileRuntime.Value;
+            return MainFile.IsMobileRuntime();
         }
     }
 }
@@ -1317,9 +1337,12 @@ public static class MolingGlobalConfig
 
 public static class TifiraAudioManager
 {
+    private const int AudioPlayerPoolSize = 3;
     private static readonly Dictionary<string, AudioStream> AudioCache = new();
     private static readonly Dictionary<string, ulong> LastSoundMsecByGroup = new();
     private static readonly Dictionary<string, ulong> SuppressedAnimSoundUntilMsec = new();
+    private static readonly List<AudioStreamPlayer> AudioPlayers = new(AudioPlayerPoolSize);
+    private static int _audioPlayerCursor;
     private static ulong _lastIdlePlayTime;
     private static ulong _lastShopPlayTime;
     private static ulong _lastCampfirePlayTime;
@@ -1551,13 +1574,17 @@ public static class TifiraAudioManager
             if (stream == null)
                 return false;
 
-            var player = new AudioStreamPlayer
-            {
-                Stream = stream,
-                VolumeDb = Mathf.LinearToDb(volume),
-            };
-            player.Finished += player.QueueFree;
-            parent.AddChild(player);
+            var player = GetAudioPlayer(parent);
+            if (player == null)
+                return false;
+
+            // Reusing a tiny pool avoids allocating and freeing a Godot node for
+            // every card voice.  Those QueueFree bursts were visible as periodic
+            // GC/frame-time spikes on Android during fast card/orb sequences.
+            if (player.Playing)
+                player.Stop();
+            player.Stream = stream;
+            player.VolumeDb = Mathf.LinearToDb(volume);
             player.Play();
             return true;
         }
@@ -1566,5 +1593,36 @@ public static class TifiraAudioManager
             Log.Warn("[TifiraDefectSkin] play sound failed: " + path + " / " + ex.Message, 2);
             return false;
         }
+    }
+
+    private static AudioStreamPlayer? GetAudioPlayer(Node fallbackParent)
+    {
+        for (var i = AudioPlayers.Count - 1; i >= 0; i--)
+        {
+            if (!GodotObject.IsInstanceValid(AudioPlayers[i]))
+                AudioPlayers.RemoveAt(i);
+        }
+
+        foreach (var existing in AudioPlayers)
+        {
+            if (!existing.Playing)
+                return existing;
+        }
+
+        if (AudioPlayers.Count < AudioPlayerPoolSize)
+        {
+            var player = new AudioStreamPlayer
+            {
+                ProcessMode = Node.ProcessModeEnum.Always,
+            };
+            var tree = Engine.GetMainLoop() as SceneTree;
+            var host = tree?.Root ?? fallbackParent;
+            host.AddChild(player);
+            AudioPlayers.Add(player);
+            return player;
+        }
+
+        _audioPlayerCursor %= AudioPlayers.Count;
+        return AudioPlayers[_audioPlayerCursor++];
     }
 }
