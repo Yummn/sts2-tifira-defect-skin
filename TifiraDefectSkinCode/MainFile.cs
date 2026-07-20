@@ -53,6 +53,9 @@ public static class MainFile
 
     private static readonly Dictionary<string, ulong> LastAnimMsecByKey = new();
     private static readonly Dictionary<string, AnimGateState> AnimGateByKey = new();
+    private static readonly Dictionary<ulong, ulong> MobileBodySleepTokens = new();
+    private static readonly MethodInfo? TryGetAnimationStateMethod =
+        typeof(MegaSprite).GetMethod("TryGetAnimationState", Type.EmptyTypes);
     private static Resource? _bodySkin;
     private static int _currentBgIndex;
     private static bool? _isMobileRuntime;
@@ -75,7 +78,7 @@ public static class MainFile
         {
             harmony.PatchAll(Assembly.GetExecutingAssembly());
             ApplySafeReflectionPatches(harmony);
-            Log.Info("[TifiraDefectSkin] loaded v1.1.7 mobile optimized: pooled audio, sleeping hidden cut-in, and smoother entry fades.", 2);
+            Log.Info("[TifiraDefectSkin] loaded v1.1.8 mobile performance: lazy/deferred cut-in, sleeping idle body, coalesced orb actions, and cached animation lookup.", 2);
         }
         catch (Exception ex)
         {
@@ -273,6 +276,13 @@ public static class MainFile
             {
                 if (player?.Character is Defect)
                 {
+                    // A played card already starts the matching body animation.
+                    // On Android, replaying cast3 for every orb packet made
+                    // multi-orb cards repeatedly reskin/update the same large
+                    // Spine skeleton and caused the sharpest combat frame drops.
+                    if (IsMobileRuntime() && TifiraAudioManager.IsCardActionGateActive())
+                        return;
+
                     // Orb channel/evoke hooks are follow-up visuals.  They often
                     // fire after the card body animation and were causing one
                     // card to play multiple cast voices on Android.
@@ -294,6 +304,9 @@ public static class MainFile
                 var player = orb?.Owner;
                 if (player?.Character is Defect)
                 {
+                    if (IsMobileRuntime() && TifiraAudioManager.IsCardActionGateActive())
+                        return;
+
                     // Keep the orb/beam animation, but do not let every evoked
                     // orb start a fresh Tifira voice line.
                     TifiraAudioManager.SuppressNextAnimSound("cast4", 900);
@@ -339,7 +352,14 @@ public static class MainFile
 
     public static void OnCombatRoomReadyPostfix()
     {
-        BattleReadyOverlay.InitializePreload();
+        // The Battle Ready skeleton is substantially larger than the body.
+        // Instantiating it at every combat entry creates a visible Android hitch
+        // even when the player never holds a card.  Mobile loads it only after a
+        // card stays in the targeting zone long enough; PC keeps eager preload.
+        if (!IsMobileRuntime())
+            BattleReadyOverlay.InitializePreload();
+        else
+            BattleReadyOverlay.ResetForCombat();
     }
 
     public static void OnHandCardPressedPostfix(NHandCardHolder __instance, object[]? __args)
@@ -522,6 +542,8 @@ public static class MainFile
         FadeCanvasItemIn(body, IsMobileRuntime() ? 0.32 : 0.22,
             bodyFadeBase.A <= 0f ? 1f : bodyFadeBase.A,
             gentleStart: IsMobileRuntime());
+        if (IsMobileRuntime())
+            ScheduleMobileBodySleep(body, 2200);
     }
 
     private static void ApplyFirstSpineChild(Node root, float scale, Vector2 offset, string preferredAnim, bool loop)
@@ -687,7 +709,16 @@ public static class MainFile
         var sprite = node.Visuals?.SpineBody;
         if (sprite == null)
             return;
-        PlayOnSprite(sprite, anim, next, loopNext, force, cooldownMs, node.Entity?.Player?.ToString() ?? "player");
+        var body = node.Body;
+        var played = PlayOnSprite(sprite, anim, next, loopNext, force, cooldownMs, node.Entity?.Player?.ToString() ?? "player");
+        if (played && IsMobileRuntime() && body != null && GodotObject.IsInstanceValid(body))
+        {
+            // Keep the action and its return-to-idle transition visible, then
+            // freeze the already rendered idle pose.  This removes the permanent
+            // per-frame Spine update without sacrificing combat actions.
+            WakeMobileBody(body);
+            ScheduleMobileBodySleep(body, GetMobileBodyAwakeDurationMs(anim));
+        }
     }
 
     private static bool PlayOnSprite(MegaSprite sprite, string anim, string? next, bool loopNext, bool force, float cooldownMs = 0, string key = "global")
@@ -696,20 +727,23 @@ public static class MainFile
         {
             var now = Time.GetTicksMsec();
 
+            // Reject duplicate/low-priority hook traffic before crossing into
+            // native Spine HasAnimation/GetAnimationState calls.  Orb-heavy
+            // cards can invoke these hooks many times in one frame on mobile.
+            if (!force && !CanStartAnim(key, anim, now))
+                return false;
+
+            var requestedAnim = anim;
+            if (!force && cooldownMs > 0)
+            {
+                var requestedKey = key + ":" + requestedAnim;
+                if (LastAnimMsecByKey.TryGetValue(requestedKey, out var last) && now - last < cooldownMs)
+                    return false;
+            }
+
             if (!sprite.HasAnimation(anim))
                 anim = FallbackAnim(sprite, anim);
             if (!sprite.HasAnimation(anim))
-                return false;
-
-            if (!force && cooldownMs > 0)
-            {
-                var fullKey = key + ":" + anim;
-                if (LastAnimMsecByKey.TryGetValue(fullKey, out var last) && now - last < cooldownMs)
-                    return false;
-                LastAnimMsecByKey[fullKey] = now;
-            }
-
-            if (!force && !CanStartAnim(key, anim, now))
                 return false;
 
             var state = TryGetAnimationStateCompat(sprite);
@@ -721,7 +755,11 @@ public static class MainFile
                 state.AddAnimation(next, 0, loopNext, 0);
 
             if (!force)
+            {
+                if (cooldownMs > 0)
+                    LastAnimMsecByKey[key + ":" + requestedAnim] = now;
                 MarkAnimStarted(key, anim, now);
+            }
             return true;
         }
         catch (Exception ex)
@@ -855,6 +893,60 @@ public static class MainFile
         return _isMobileRuntime.Value;
     }
 
+    private static int GetMobileBodyAwakeDurationMs(string anim)
+    {
+        return anim switch
+        {
+            "victory_ready" or "victory" or "die" => 2600,
+            "cast4" => 1900,
+            "attack2" => 1700,
+            "attack" or "cast" or "cast2" or "cast3" or "hurt" => 1450,
+            _ => 1300,
+        };
+    }
+
+    private static void WakeMobileBody(Node2D body)
+    {
+        try
+        {
+            var id = body.GetInstanceId();
+            MobileBodySleepTokens[id] = MobileBodySleepTokens.TryGetValue(id, out var token) ? token + 1UL : 1UL;
+            body.ProcessMode = Node.ProcessModeEnum.Inherit;
+        }
+        catch { }
+    }
+
+    private static void ScheduleMobileBodySleep(Node2D body, int delayMs)
+    {
+        try
+        {
+            if (!GodotObject.IsInstanceValid(body))
+                return;
+
+            var id = body.GetInstanceId();
+            var token = MobileBodySleepTokens.TryGetValue(id, out var current) ? current + 1UL : 1UL;
+            MobileBodySleepTokens[id] = token;
+            var tree = Engine.GetMainLoop() as SceneTree;
+            if (tree == null)
+                return;
+
+            var timer = tree.CreateTimer(Math.Max(0.05, delayMs / 1000.0));
+            timer.Timeout += () =>
+            {
+                try
+                {
+                    if (!MobileBodySleepTokens.TryGetValue(id, out var latest) || latest != token)
+                        return;
+                    MobileBodySleepTokens.Remove(id);
+                    if (GodotObject.IsInstanceValid(body))
+                        body.ProcessMode = Node.ProcessModeEnum.Disabled;
+                }
+                catch { }
+            };
+        }
+        catch { }
+    }
+
     private static string FallbackAnim(MegaSprite sprite, string requested)
     {
         if ((requested == "cast3" || requested == "cast4") && sprite.HasAnimation("cast2")) return "cast2";
@@ -871,9 +963,8 @@ public static class MainFile
         try
         {
             // v0.107 added TryGetAnimationState(); v0.103 only has GetAnimationState().
-            var tryMethod = typeof(MegaSprite).GetMethod("TryGetAnimationState", Type.EmptyTypes);
-            if (tryMethod != null)
-                return tryMethod.Invoke(sprite, null) as MegaAnimationState;
+            if (TryGetAnimationStateMethod != null)
+                return TryGetAnimationStateMethod.Invoke(sprite, null) as MegaAnimationState;
 
             return sprite.GetAnimationState();
         }
@@ -962,6 +1053,27 @@ public static class MainFile
         private const int MobileHoldDelayMs = 360;
         private const int OverlayReopenCooldownMs = 650;
 
+        public static void ResetForCombat()
+        {
+            _pendingCard = null;
+            _pendingToken++;
+            _activeCard = null;
+            _busy = false;
+            _played = false;
+            _fadingOut = false;
+            _lastOverlayStartMsec = 0;
+            KillFadeTween();
+
+            // A previous combat owns the old scene node.  Never retain wrappers
+            // across combat trees; they can become invalid and trigger repeated
+            // exceptions/native lookups on the next card interaction.
+            if (_node == null || !GodotObject.IsInstanceValid(_node))
+            {
+                _node = null;
+                _sprite = null;
+            }
+        }
+
         public static void InitializePreload()
         {
             try
@@ -1037,9 +1149,15 @@ public static class MainFile
             if (!TifiraConfig.UseBattleReadyAnim || card.Owner?.Character is not Defect)
                 return;
 
+            if ((_pendingCard == card) || (_busy && _activeCard == card && !_fadingOut))
+                return;
+
             _pendingCard = card;
             var requestToken = ++_pendingToken;
-            StartOverlayNow(card, requestToken);
+            if (IsMobileRuntime())
+                Schedule(220, () => StartOverlayNow(card, requestToken));
+            else
+                StartOverlayNow(card, requestToken);
         }
 
         private static void StartOverlayNow(CardModel card, ulong requestToken)
@@ -1416,6 +1534,18 @@ public static class TifiraAudioManager
             _cardActionAudioGateUntilMsec = Time.GetTicksMsec() + 2600UL;
         }
         catch { }
+    }
+
+    public static bool IsCardActionGateActive()
+    {
+        try
+        {
+            return _cardActionAudioGateUntilMsec != 0 && Time.GetTicksMsec() <= _cardActionAudioGateUntilMsec;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     public static void SuppressNextAnimSound(string animName, int durationMs)

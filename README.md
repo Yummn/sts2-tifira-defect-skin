@@ -1,4 +1,4 @@
-# 蒂菲拉故障机器人皮肤增强版 (TifiraDefectSkin) v1.1.7
+# 蒂菲拉故障机器人皮肤增强版 (TifiraDefectSkin) v1.1.8
 
 Slay the Spire 2 故障机器人皮肤替换/增强 MOD。下载 Releases 里的 zip，解压后把 `TifiraDefectSkin` 文件夹复制到游戏 `mods/` 目录。
 
@@ -10,9 +10,19 @@ Slay the Spire 2 故障机器人皮肤替换/增强 MOD。下载 Releases 里的
 - 卡牌进入出牌区/目标选择流程后显示左侧 Battle Ready 立绘演出，普通点牌/查看卡牌不再触发。
 - v1.1.6 起一张卡牌只允许一次战斗语音；Battle Ready 的 `card_attack` / `card_casting` 只保留演出不单独发声；充能球充能/激发后续动画静音，避免一张牌或球连击持续触发多段语音。
 - v1.1.7 优化手机端常驻开销与入场观感：隐藏的 Battle Ready Spine 会休眠、语音播放器复用，角色 body 与左侧立绘以更柔和的渐变进入。
+- v1.1.8 进一步降低手机战斗开销：Battle Ready 按需延迟创建；快速出牌不加载大切入骨骼；角色待机定格休眠、动作时自动唤醒；一张牌触发的多次充能球动作合并处理。
 - 普通攻击、多段/群体攻击、防御/支援、充能球充能/激发、受击、胜利等动作绑定到对应资源。
 - 绑定原资源包内的角色语音与战斗音效。
 - 不改动卡牌数值，不影响玩法。
+
+## v1.1.8 手机帧率优化
+
+- Android 进入战斗时不再预先实例化约 1.7 MB 的 Battle Ready Spine；只有卡牌在出牌/目标区域持续约 220ms 时才按需创建。快速点出或快速拖出的卡牌直接取消待处理请求。
+- 战斗 body 完成入场并返回待机姿势后切换为 `ProcessMode.Disabled`，停止大型 Spine 骨骼的常驻逐帧更新；攻击、施法、受击或胜利动作开始时自动唤醒，动作结束后再次休眠。
+- 同一卡牌 2.6 秒动作窗口内，充能球充能/激发 Hook 不再反复覆盖主卡牌动作，减少多球牌在同一帧中的重复原生调用和骨骼重算。
+- `TryGetAnimationState` 兼容反射改为一次缓存；动画优先级和冷却检查提前到 `HasAnimation`/动画状态查询之前，重复 Hook 会在托管层直接退出。
+- Battle Ready 的 `TryShowEvokingOrbs` 连续回调增加同卡去重，避免每帧重复创建定时器。
+- PC 仍保留战斗进入时的 Battle Ready 预载和完整待机动画；自动休眠/延迟加载只在 Android/iOS 启用。
 
 ## v1.1.7 手机性能与入场优化
 
@@ -68,3 +78,4 @@ Slay the Spire 2 故障机器人皮肤替换/增强 MOD。下载 Releases 里的
 - v1.1.5：Battle Ready 不再绑定 raw card press，而是绑定 NCardPlay 进入出牌区/目标选择阶段，普通点牌/查看卡牌不再弹左侧大立绘。
 - v1.1.6：修复一张牌和充能球连击触发多次语音；每张卡只允许一次战斗语音，Battle Ready cut-in 和球后续动画静音。
 - v1.1.7：隐藏 Battle Ready 时暂停 Spine 处理，音频播放器三槽复用并按需加载；手机 body/Battle Ready 入场分别延长到 0.32/0.26 秒并修复首帧闪现。
+- v1.1.8：手机 Battle Ready 改为按需延迟加载，body 待机自动休眠、动作时唤醒；合并同卡多球后续动作并缓存动画反射查询。
