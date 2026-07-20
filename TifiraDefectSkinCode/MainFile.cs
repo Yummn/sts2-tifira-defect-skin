@@ -53,7 +53,7 @@ public static class MainFile
 
     private static readonly Dictionary<string, ulong> LastAnimMsecByKey = new();
     private static readonly Dictionary<string, AnimGateState> AnimGateByKey = new();
-    private static readonly Dictionary<ulong, ulong> MobileBodySleepTokens = new();
+    private static readonly Dictionary<int, ulong> MobileCardAnimTokens = new();
     private static readonly MethodInfo? TryGetAnimationStateMethod =
         typeof(MegaSprite).GetMethod("TryGetAnimationState", Type.EmptyTypes);
     private static Resource? _bodySkin;
@@ -78,7 +78,7 @@ public static class MainFile
         {
             harmony.PatchAll(Assembly.GetExecutingAssembly());
             ApplySafeReflectionPatches(harmony);
-            Log.Info("[TifiraDefectSkin] loaded v1.1.8 mobile performance: lazy/deferred cut-in, sleeping idle body, coalesced orb actions, and cached animation lookup.", 2);
+            Log.Info("[TifiraDefectSkin] loaded v1.1.9 card-play performance: restored idle animation, single-Spine mobile play path, deferred body action, and one victory voice.", 2);
         }
         catch (Exception ex)
         {
@@ -237,7 +237,7 @@ public static class MainFile
                 var anim = ChooseCardAnim(card);
                 TifiraAudioManager.BeginCardActionAudioGate(anim);
                 BattleReadyOverlay.NotifyBeforeCardPlayed(cardPlay);
-                PlayPlayerAnim(card.Owner, anim, returnIdle: true, cooldownMs: 120);
+                ScheduleCardPlayBodyAnim(card.Owner, anim);
                 // The attached Spine animation_started listener plays the
                 // matching voice/SFX.  Calling PlayLogicalSound here as well
                 // caused the same clip to be started twice on Android, heard
@@ -338,6 +338,11 @@ public static class MainFile
         {
             try
             {
+                // Hook.AfterCombatVictory may be dispatched repeatedly while the
+                // reward room settles.  Only the first dispatch may restart the
+                // victory animation or open the victory voice gate.
+                if (!TifiraAudioManager.BeginVictorySequence())
+                    return;
                 foreach (var node in NCombatRoom.Instance?.CreatureNodes ?? Array.Empty<NCreature>())
                 {
                     if (node.Entity?.Player?.Character is Defect)
@@ -352,6 +357,8 @@ public static class MainFile
 
     public static void OnCombatRoomReadyPostfix()
     {
+        TifiraAudioManager.ResetForCombat();
+        TifiraAudioManager.ScheduleCombatVoiceWarmup();
         // The Battle Ready skeleton is substantially larger than the body.
         // Instantiating it at every combat entry creates a visible Android hitch
         // even when the player never holds a card.  Mobile loads it only after a
@@ -542,8 +549,10 @@ public static class MainFile
         FadeCanvasItemIn(body, IsMobileRuntime() ? 0.32 : 0.22,
             bodyFadeBase.A <= 0f ? 1f : bodyFadeBase.A,
             gentleStart: IsMobileRuntime());
-        if (IsMobileRuntime())
-            ScheduleMobileBodySleep(body, 2200);
+        // v1.1.9 restores the complete idle loop requested by the user.  Only
+        // the hidden Battle Ready cut-in sleeps; the visible combat body keeps
+        // processing idle_loop continuously on mobile and PC.
+        body.ProcessMode = Node.ProcessModeEnum.Inherit;
     }
 
     private static void ApplyFirstSpineChild(Node root, float scale, Vector2 offset, string preferredAnim, bool loop)
@@ -704,21 +713,52 @@ public static class MainFile
         PlayOnNode(node, anim, returnIdle ? "idle_loop" : null, loopNext: returnIdle, force: false, cooldownMs: cooldownMs);
     }
 
+    private static void ScheduleCardPlayBodyAnim(Player player, string anim)
+    {
+        if (!IsMobileRuntime())
+        {
+            PlayPlayerAnim(player, anim, returnIdle: true, cooldownMs: 120);
+            return;
+        }
+
+        try
+        {
+            // BeforeCardPlayed is shared with card movement, VFX and several
+            // other mods.  Starting a large Spine action synchronously in that
+            // prefix stacks all work into the release frame.  Move only the
+            // cosmetic body transition a few frames later and coalesce bursts.
+            var key = player.GetHashCode();
+            var token = MobileCardAnimTokens.TryGetValue(key, out var current) ? current + 1UL : 1UL;
+            MobileCardAnimTokens[key] = token;
+            var tree = Engine.GetMainLoop() as SceneTree;
+            if (tree == null)
+                return;
+
+            var timer = tree.CreateTimer(0.10);
+            timer.Timeout += () =>
+            {
+                try
+                {
+                    if (!MobileCardAnimTokens.TryGetValue(key, out var latest) || latest != token)
+                        return;
+                    MobileCardAnimTokens.Remove(key);
+                    PlayPlayerAnim(player, anim, returnIdle: true, cooldownMs: 120);
+                }
+                catch { }
+            };
+        }
+        catch
+        {
+            PlayPlayerAnim(player, anim, returnIdle: true, cooldownMs: 120);
+        }
+    }
+
     private static void PlayOnNode(NCreature node, string anim, string? next, bool loopNext, bool force, float cooldownMs = 0)
     {
         var sprite = node.Visuals?.SpineBody;
         if (sprite == null)
             return;
-        var body = node.Body;
-        var played = PlayOnSprite(sprite, anim, next, loopNext, force, cooldownMs, node.Entity?.Player?.ToString() ?? "player");
-        if (played && IsMobileRuntime() && body != null && GodotObject.IsInstanceValid(body))
-        {
-            // Keep the action and its return-to-idle transition visible, then
-            // freeze the already rendered idle pose.  This removes the permanent
-            // per-frame Spine update without sacrificing combat actions.
-            WakeMobileBody(body);
-            ScheduleMobileBodySleep(body, GetMobileBodyAwakeDurationMs(anim));
-        }
+        PlayOnSprite(sprite, anim, next, loopNext, force, cooldownMs, node.Entity?.Player?.ToString() ?? "player");
     }
 
     private static bool PlayOnSprite(MegaSprite sprite, string anim, string? next, bool loopNext, bool force, float cooldownMs = 0, string key = "global")
@@ -893,60 +933,6 @@ public static class MainFile
         return _isMobileRuntime.Value;
     }
 
-    private static int GetMobileBodyAwakeDurationMs(string anim)
-    {
-        return anim switch
-        {
-            "victory_ready" or "victory" or "die" => 2600,
-            "cast4" => 1900,
-            "attack2" => 1700,
-            "attack" or "cast" or "cast2" or "cast3" or "hurt" => 1450,
-            _ => 1300,
-        };
-    }
-
-    private static void WakeMobileBody(Node2D body)
-    {
-        try
-        {
-            var id = body.GetInstanceId();
-            MobileBodySleepTokens[id] = MobileBodySleepTokens.TryGetValue(id, out var token) ? token + 1UL : 1UL;
-            body.ProcessMode = Node.ProcessModeEnum.Inherit;
-        }
-        catch { }
-    }
-
-    private static void ScheduleMobileBodySleep(Node2D body, int delayMs)
-    {
-        try
-        {
-            if (!GodotObject.IsInstanceValid(body))
-                return;
-
-            var id = body.GetInstanceId();
-            var token = MobileBodySleepTokens.TryGetValue(id, out var current) ? current + 1UL : 1UL;
-            MobileBodySleepTokens[id] = token;
-            var tree = Engine.GetMainLoop() as SceneTree;
-            if (tree == null)
-                return;
-
-            var timer = tree.CreateTimer(Math.Max(0.05, delayMs / 1000.0));
-            timer.Timeout += () =>
-            {
-                try
-                {
-                    if (!MobileBodySleepTokens.TryGetValue(id, out var latest) || latest != token)
-                        return;
-                    MobileBodySleepTokens.Remove(id);
-                    if (GodotObject.IsInstanceValid(body))
-                        body.ProcessMode = Node.ProcessModeEnum.Disabled;
-                }
-                catch { }
-            };
-        }
-        catch { }
-    }
-
     private static string FallbackAnim(MegaSprite sprite, string requested)
     {
         if ((requested == "cast3" || requested == "cast4") && sprite.HasAnimation("cast2")) return "cast2";
@@ -1051,6 +1037,7 @@ public static class MainFile
         private static Tween? _fadeTween;
         private const int PcHoldDelayMs = 160;
         private const int MobileHoldDelayMs = 360;
+        private const int MobilePlayZoneDelayMs = 800;
         private const int OverlayReopenCooldownMs = 650;
 
         public static void ResetForCombat()
@@ -1155,7 +1142,7 @@ public static class MainFile
             _pendingCard = card;
             var requestToken = ++_pendingToken;
             if (IsMobileRuntime())
-                Schedule(220, () => StartOverlayNow(card, requestToken));
+                Schedule(MobilePlayZoneDelayMs, () => StartOverlayNow(card, requestToken));
             else
                 StartOverlayNow(card, requestToken);
         }
@@ -1219,6 +1206,16 @@ public static class MainFile
             CancelPending(cardPlay.Card);
             if (!_busy || _activeCard != cardPlay.Card || _sprite == null)
                 return;
+
+            if (IsMobileRuntime())
+            {
+                // Never run the large Battle Ready action and the body action in
+                // the same Android frame.  The cut-in still appears while the
+                // player aims/holds, but it is put to sleep before card commit.
+                HideImmediate();
+                return;
+            }
+
             _played = true;
             var anim = cardPlay.Card.Type == CardType.Attack ? "card_attack" : "card_casting";
             PlayOnSprite(_sprite, anim, null, loopNext: false, force: true);
@@ -1467,6 +1464,9 @@ public static class TifiraAudioManager
     private static ulong _cardActionAudioGateUntilMsec;
     private static string _cardActionPreferredAnim = "";
     private static bool _cardActionVoiceConsumed;
+    private static bool _victorySequenceActive;
+    private static bool _victoryVoiceConsumed;
+    private static bool _combatVoiceWarmupQueued;
 
     private static readonly string[] AttackSounds =
     [
@@ -1487,10 +1487,18 @@ public static class TifiraAudioManager
             return;
 
         var ticks = Time.GetTicksMsec();
+        var group = GetAudioGroup(animName);
+
+        // Once victory starts, late animation callbacks from the final card,
+        // orb, hurt response or idle loop must not start another voice over the
+        // victory line.  This also closes the race where combat hooks settle in
+        // a different order on Android.
+        if (_victorySequenceActive && group != "victory")
+            return;
+
         if (ShouldMuteAnimSound(animName, ticks))
             return;
 
-        var group = GetAudioGroup(animName);
         if (!AllowCombatActionVoice(animName, group, ticks))
             return;
 
@@ -1500,6 +1508,13 @@ public static class TifiraAudioManager
             ticks - lastGroupPlay < (ulong)minInterval)
         {
             return;
+        }
+
+        if (group == "victory")
+        {
+            if (_victoryVoiceConsumed)
+                return;
+            _victoryVoiceConsumed = true;
         }
 
         string? path = animName switch
@@ -1532,6 +1547,79 @@ public static class TifiraAudioManager
             _cardActionPreferredAnim = preferredAnim ?? "";
             _cardActionVoiceConsumed = false;
             _cardActionAudioGateUntilMsec = Time.GetTicksMsec() + 2600UL;
+        }
+        catch { }
+    }
+
+    public static void ResetForCombat()
+    {
+        _cardActionAudioGateUntilMsec = 0;
+        _cardActionPreferredAnim = "";
+        _cardActionVoiceConsumed = false;
+        _victorySequenceActive = false;
+        _victoryVoiceConsumed = false;
+        _combatVoiceWarmupQueued = false;
+    }
+
+    public static bool BeginVictorySequence()
+    {
+        // AfterCombatVictory can be emitted more than once while rewards and
+        // room transitions settle.  Do not reopen the voice gate on repeats.
+        if (_victorySequenceActive)
+            return false;
+        _victorySequenceActive = true;
+        _victoryVoiceConsumed = false;
+        _cardActionAudioGateUntilMsec = 0;
+        _cardActionPreferredAnim = "";
+        _cardActionVoiceConsumed = true;
+
+        // Stop the tail of the final card/orb voice before starting the single
+        // victory line.  Otherwise two pooled players can overlap and sound
+        // like the victory voice was triggered more than once.
+        foreach (var player in AudioPlayers)
+        {
+            try
+            {
+                if (GodotObject.IsInstanceValid(player) && player.Playing)
+                    player.Stop();
+            }
+            catch { }
+        }
+        return true;
+    }
+
+    public static void ScheduleCombatVoiceWarmup()
+    {
+        if (_combatVoiceWarmupQueued)
+            return;
+        _combatVoiceWarmupQueued = true;
+
+        // Loading an OGG for the first time inside BeforeCardPlayed adds disk
+        // decode work to the same frame as card movement, VFX and Spine state
+        // changes.  Warm only the two common card clips, on the main thread and
+        // after the combat scene is stable.  This avoids the unsafe threaded or
+        // all-at-once startup preload paths used by earlier experiments.
+        ScheduleWarmup(420, AttackSounds[0]);
+        ScheduleWarmup(680, CastSounds[0]);
+    }
+
+    private static void ScheduleWarmup(int delayMs, string path)
+    {
+        try
+        {
+            var tree = Engine.GetMainLoop() as SceneTree;
+            if (tree == null)
+                return;
+            var timer = tree.CreateTimer(delayMs / 1000.0);
+            timer.Timeout += () =>
+            {
+                try
+                {
+                    if (!_victorySequenceActive && NCombatRoom.Instance != null)
+                        GetStream(path);
+                }
+                catch { }
+            };
         }
         catch { }
     }
