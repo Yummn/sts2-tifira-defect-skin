@@ -58,7 +58,7 @@ Slay the Spire 2 故障机器人皮肤替换/增强 MOD。下载 Releases 里的
 
 ## 资源来源
 
-- 原始资源包 / Mod：`TifiraDefectSkin-v1.0.14.zip`
+- 原始资源包 / Mod：`蒂菲拉故障机器人皮肤-v1.0.14.zip`
 - 原作者 / 来源标注：`B站/抖音：异色缸墨灵`
 - 本增强版只在原资源基础上补充触发逻辑、manifest、打包和兼容性处理；角色图片、Spine、音频等素材仍来自原包。
 
